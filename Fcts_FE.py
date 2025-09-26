@@ -673,7 +673,112 @@ def find_indices_except_two_highest(lst):
     result_indices = sorted_indices[:-2]  # Retrieve all indices except the last two (highest values)
     return result_indices
 
-def test_skeletonization(barcodes, ome_zarrs_dict, ome_zarr_df, table_name, label_name, pyramid_level = 0, n = 5, seed = 0, sigma_skeleton = 3, n_angle_determination = 50, radius_multiplier = 0.5):
+def skeleton_feats(images, row_data, OID, spacing, sigma_skeleton, radius_multiplier=0.5):
+    """
+    Extracts skeleton-based features from the binary mask image and updates the results dictionary.
+
+    Parameters:
+    - images (dict): Dictionary containing the binary mask under the key "Mask".
+      The mask should be a 2D numpy array representing the segmented object.
+    - row_data (dict): Dictionary to store extracted features. This dict is updated and returned.
+    - OID (str): Object identifier, used for bookkeeping; not directly used in this function.
+    - spacing (float): Physical pixel size to convert pixel distances to real units.
+    - sigma_skeleton (float): Sigma for Gaussian blur prior to skeletonization.
+    - radius_multiplier (float, optional): Multiplier applied to the max inscribed circle radius 
+      for feature calculation. Default is 0.5.
+    """
+    mask = images["Mask"]
+    _, _, _, _, crypt_number, crypt_length_total, longest_crypt = extract_skeleton_features(mask, spacing, sigma_skeleton, radius_multiplier)
+    row_data["crypt_count"] = crypt_number
+    row_data["crypt_length_total"] = crypt_length_total
+    row_data["crypt_length_max"] = longest_crypt
+    return row_data
+
+def extract_skeleton_features(image, spacing, sigma_skeleton=3, radius_multiplier=0.5, n_angle_determination=50):
+    """
+    Extract skeleton features and optionally elongate the skeleton from a binary mask image.
+
+    Parameters:
+    - image (numpy.ndarray): 2D binary mask image (e.g., uint8 or bool) representing the segmented object.
+    - spacing (float): Physical pixel spacing to convert pixel distances to real-world units.
+    - sigma_skeleton (float, optional): Sigma for Gaussian blur before skeletonization to smooth the mask. Default is 3.
+    - radius_multiplier (float, optional): Multiplier for radius when computing the maximum inscribed circle. Default is 0.5.
+    - n_angle_determination (int, optional): Number of pixels used to determine the elongation angle of skeleton endpoints. Default is 50.
+    """
+    blurred_image = filters.gaussian(image, sigma=sigma_skeleton)
+    skeleton = morphology.skeletonize(blurred_image, method="lee")
+    mask_circle, radius, center = get_max_inscribed_circle(image, radius_multiplier=radius_multiplier, value=255)
+    skeleton[mask_circle.astype(bool)] = 0
+
+    if np.sum(skeleton.astype(bool)) > 2:
+        skeleton_data = summarize(Skeleton(skeleton))
+        skeleton_data = skeleton_data[skeleton_data["branch-type"] != 2]
+        elongated_skeleton = np.copy(skeleton)
+        skeleton_int = np.copy(skeleton)
+
+        skeleton_data = define_center_touching_branches(skeleton_data, mask_circle)
+        skeleton_data = skeleton_data[~((skeleton_data["branch-type"] == 1) & (skeleton_data["Touching"] == 1))]
+        skeleton_data = determine_skeleton_endpoints(skeleton_data, center, spacing)
+
+        for row in skeleton_data.index:
+            y, x = int(skeleton_data.loc[row,"endpoint-y"]), int(skeleton_data.loc[row,"endpoint-x"])
+            adj_y, adj_x = y, x
+            for _ in range(n_angle_determination):
+                skeleton_int[adj_y, adj_x] = 0
+                adj_y, adj_x, _ = find_adjacent_nonzero_pixel((adj_y, adj_x), skeleton_int)
+            deg = calculate_angle((adj_x, adj_y), (x, y))
+            x_end, y_end = calculate_endpoint((x, y), deg, image)
+            skeleton_data.loc[row, "x_end"] = x_end
+            skeleton_data.loc[row, "y_end"] = y_end
+            elongated_skeleton = draw_line(elongated_skeleton, (x, y), (x_end, y_end))
+
+        # Re-calculate features after elongation
+        skeleton_data = summarize(Skeleton(elongated_skeleton))
+        skeleton_data = skeleton_data[skeleton_data["branch-type"] != 2]
+        skeleton_data = define_center_touching_branches(skeleton_data, mask_circle)
+        skeleton_data = skeleton_data[~((skeleton_data["branch-type"] == 1) & (skeleton_data["Touching"] == 1))]
+        crypt_number = len(skeleton_data)
+        crypt_length_total = np.sum(skeleton_data["branch-distance"]) * spacing if crypt_number > 0 else 0
+        longest_crypt = np.max(skeleton_data["branch-distance"]) * spacing if crypt_number > 0 else 0
+
+        return elongated_skeleton, mask_circle, radius, center, crypt_number, crypt_length_total, longest_crypt
+
+    return skeleton, mask_circle, radius, center, 0, 0, 0
+
+def pad_to_aspect_ratio(image, target_aspect_ratio = 1.0):
+    """
+    Pad a 2D image with black pixels to achieve a target aspect ratio without distortion.
+
+    Parameters:
+    - image (numpy.ndarray): 2D array representing a grayscale or binary image.
+    - target_aspect_ratio (float, optional): Desired width-to-height ratio for the output image.
+      Default is 1.0 (square).
+    """
+    height, width = image.shape
+    current_aspect = width / height
+
+    if np.isclose(current_aspect, target_aspect_ratio):
+        return image
+
+    if current_aspect < target_aspect_ratio:
+        # Pad width
+        new_width = int(np.ceil(target_aspect_ratio * height))
+        pad_total = new_width - width
+        pad_left = pad_total // 2
+        pad_right = pad_total - pad_left
+        padded_image = np.pad(image, ((0, 0), (pad_left, pad_right)), mode='constant', constant_values=0)
+    else:
+        # Pad height
+        new_height = int(np.ceil(width / target_aspect_ratio))
+        pad_total = new_height - height
+        pad_top = pad_total // 2
+        pad_bottom = pad_total - pad_top
+        padded_image = np.pad(image, ((pad_top, pad_bottom), (0, 0)), mode='constant', constant_values=0)
+
+    return padded_image
+
+def test_skeletonization(barcodes, ome_zarrs_dict, ome_zarr_df, table_name, label_name, pyramid_level=0,
+                        n=5, seed=0, sigma_skeleton=3, n_angle_determination=50, radius_multiplier=0.5):
     """
     Test the skeletonization process on a set of randomly seletected organoid masks and generate visualizations.
 
@@ -690,119 +795,43 @@ def test_skeletonization(barcodes, ome_zarrs_dict, ome_zarr_df, table_name, labe
     - n_angle_determination (int): Number of pixels used to determine angles of skeleton endpoints.
     - radius_multiplier (float): Multiplier for the radius in max inscribed circle calculation. The lower the multiplier, the more sensitive the algorithm for smaller crypts.
     """
-
-    # Set seed
     random.seed(seed)
+    for barcode in barcodes:
+        masks_lst = ome_zarr_df[ome_zarr_df["Barcode"] == barcode]["UID"].tolist()
+        sampled_masks = []
+        n_attempts = 0
+        while len(sampled_masks) < n and n_attempts < 5*n:
+            mask_candidate = random.choice(masks_lst)
+            _, mask_img = load_img_mask_by_UID(mask_candidate, ome_zarrs_dict, table_name, label_name,
+                                               pyramid_level, 0)
+            if np.max(measure.label(mask_img.astype(bool))) == 1:
+                if mask_candidate not in sampled_masks:
+                    sampled_masks.append(mask_candidate)
+            n_attempts += 1
 
-    # Get list of files for every folder and sample n masks
-    for y, folders in enumerate(barcodes): # Loop through imaging plates
+        well_names = ome_zarrs_dict[barcode].get_names()
+        ncols = max(len(sampled_masks), 1)
+        fig, axarr = plt.subplots(1, ncols, figsize=(5*ncols, 8), squeeze=False)
+        plt.suptitle(barcode, fontsize=20)
 
-        masks_lst = ome_zarr_df[ome_zarr_df["Barcode"] == folders]["UID"].tolist()
-        masks = random.sample(masks_lst, n)  # Take random sample of n masks
-        well_names = ome_zarrs_dict[folders].get_names()
-        
-        # Set up plot
-        fig, ax = plt.subplots(nrows=1, ncols=n, figsize=(5*n,8))
-        plt.suptitle(barcodes[y], fontsize = 20)
-
-        for col, mask in enumerate(masks):
-
-            obj_id = mask.split("-")[-1]
-            well_id = mask.split("-")[-2]
-    
-            spacing = ome_zarrs_dict[folders][well_names.index(well_id)].get_scale(pyramid_level)[-1] # Get spacing for this pyramid level
-            _, image = load_img_mask_by_UID(mask, ome_zarrs_dict, table_name, label_name, pyramid_level, 0) # Load mask
-
-            
-            while np.max(measure.label(image.astype(bool))) != 1:
-
-                mask = random.sample(masks_lst, 1)[0] # Gets new random organoid ID from list
-
-                _, image = load_img_mask_by_UID(mask, ome_zarrs_dict, table_name, label_name, pyramid_level, 0) # Load mask
-
-
-
-                obj_id = mask.split("-")[-1]
-                well_id = mask.split("-")[-2]
-
-            image = image.astype(np.uint8) # Convert to uint8 for processing
-
-            skeleton = morphology.skeletonize(filters.gaussian(image, sigma = sigma_skeleton), method = "lee")
-            mask_circle, radius, center = get_max_inscribed_circle(image, radius_multiplier = radius_multiplier, value = 255)
-
-            # Update skeleton so that circle overlay is deleted
-            skeleton[mask_circle.astype(bool)] = 0
-            
-            # Extract data
-            if len(skeleton[skeleton.astype(bool)]) > 1:
-                
-                skeleton_data = summarize(Skeleton(skeleton))
-                skeleton_data = skeleton_data[skeleton_data["branch-type"] != 2]
-                elongated_skeleton = np.copy(skeleton)
-                skeleton_int = np.copy(skeleton)
-                
-                skeleton_data = define_center_touching_branches(skeleton_data, mask_circle)
-
-                #Remove branches which are branchtype 1 (junction-endpoint) and touch the circle, as well as branchtype 2 (junction-junction)
-                skeleton_data = skeleton_data[~((skeleton_data["branch-type"] == 1) & (skeleton_data["Touching"] == 1))]
-                
-                # Elongate Skeleton in same angle as last n_angle_determination pixel of branches
-                skeleton_data = determine_skeleton_endpoints(skeleton_data, center, spacing)
-
-                for row in skeleton_data.index:
-
-                    start_y = int(skeleton_data.loc[row,"endpoint-y"])
-                    start_x = int(skeleton_data.loc[row,"endpoint-x"])
-                    adj_y, adj_x = (start_y,start_x)
-
-                    for i in range(n_angle_determination):
-                        skeleton_int[adj_y, adj_x] = 0
-                        adj_y, adj_x, _ = find_adjacent_nonzero_pixel((adj_y, adj_x), skeleton_int)
-
-                    deg = calculate_angle((adj_x,adj_y),(start_x, start_y))
-                    x_end, y_end = calculate_endpoint((start_x,start_y), deg, image)
-                    skeleton_data.loc[row, "x_end"] = x_end
-                    skeleton_data.loc[row, "y_end"] = y_end
-
-                    elongated_skeleton = draw_line(elongated_skeleton, (start_x,start_y), (x_end,y_end))
-                
-                skeleton_data = summarize(Skeleton(elongated_skeleton))
-
-                skeleton_data = skeleton_data[skeleton_data["branch-type"] != 2]
-
-                skeleton_data = define_center_touching_branches(skeleton_data, mask_circle)
-
-                # Remove branches which are branchtype 1 (junction-endpoint) and touch the circle, as well as branchtype 2 (junction-junction)
-                skeleton_data = skeleton_data[~((skeleton_data["branch-type"] == 1) & (skeleton_data["Touching"] == 1))]
-
-                # Count first endpoint-to-endpoint branches
-                crypt_number = len(skeleton_data)               
-                crypt_length_total = np.sum(skeleton_data["branch-distance"])*spacing
-                longest_crypt = np.max(skeleton_data["branch-distance"])*spacing
-                
-                skeleton = elongated_skeleton
-            else:
-                crypt_number = 0
-                crypt_length_total = 0
-                longest_crypt = 0
-
-            # Plot all into one
+        for i, mask in enumerate(sampled_masks):
+            obj_id, well_id = mask.split("-")[-1], mask.split("-")[-2]
+            spacing = ome_zarrs_dict[barcode][well_names.index(well_id)].get_scale(pyramid_level)[-1]
+            _, image = load_img_mask_by_UID(mask, ome_zarrs_dict, table_name, label_name, pyramid_level, 0)
+            image = image.astype(np.uint8)
+            image[image != 0] = 255
+            skeleton, mask_circle, radius, center, crypt_count, crypt_length_total, longest_crypt = \
+                extract_skeleton_features(image, spacing, sigma_skeleton, radius_multiplier, n_angle_determination)
             image_plot = np.copy(image)
-
             image_plot[skeleton.astype(bool)] = 0
-
-            img_plot = cv2.circle(image_plot, tuple(center), int(radius*radius_multiplier), 1)
-
-
-
-
-            ax[col].imshow(img_plot, cmap=plt.cm.gray, aspect = "auto")
-            ax[col].set_axis_off()
-
-                
-            ax[col].set_title("%s - %s"%(well_id,obj_id), fontsize = 12, loc='right')
-            ax[col].set_title("\nNumber of crypts: %d\nCrypt lenght: %d µm\nLongest crypt: %d µm"%(crypt_number, crypt_length_total, longest_crypt), fontsize = 12, loc='left')
-        
+            img_plot = cv2.circle(image_plot, tuple(center), int(radius*radius_multiplier), 0) # Draw max inscribed circle
+            img_plot = pad_to_aspect_ratio(img_plot)
+            ax = axarr[0][i] if ncols > 1 else axarr[0]
+            ax.imshow(img_plot, cmap=plt.cm.gray, aspect="auto")
+            ax.set_axis_off()
+            ax.set_title(
+                f"{well_id} - {obj_id}\nNumber of crypts: {crypt_count}\nCrypt length: {int(crypt_length_total)} µm\nLongest crypt: {int(longest_crypt)} µm",
+                fontsize=12)
         plt.tight_layout()
 
 def image_preprocessing(stainings, experiment_setup, images, OID, thresholds, sigma = 3):
@@ -845,63 +874,71 @@ def image_preprocessing(stainings, experiment_setup, images, OID, thresholds, si
         
     return images
 
-def get_border_fraction(mask, df, OID):
-
+def get_border_fraction(mask, row_data, OID):
     """
     Calculate the largest fraction of an object that has a straight edge.
 
     Parameters:
     - mask (ndarray): Binary mask representing the segmented object.
-    - df (DataFrame): DataFrame to store the calculated features.
-    - OID (str): Organoid ID for DataFrame indexing.
-    """
+    - row_data (dict): Dictionary to store the calculated features.
+    - OID (str): Object ID (for API consistency).
 
-    # Ensure the mask is binary
+    Returns:
+    - row_data (dict): Updated with straight edge features.
+    """
+    # Ensure binary mask
     mask = mask > 0
 
-    # Find the indices where the mask is True
+    # Get object bounding box in mask
     indices = np.argwhere(mask)
+    if indices.size == 0:
+        # Empty mask: set features to zero and return
+        row_data["StraightEdge_longest"] = 0
+        row_data["StraightEdge_longest_fraction"] = 0
+        return row_data
 
-    # Get the minimum and maximum indices for both dimensions
     y_min, x_min = indices.min(axis=0)
     y_max, x_max = indices.max(axis=0)
 
-    
-    """ 
-    # Get straight edges along contour
-    v_left = np.sum(mask[:,x_min])/mask.shape[0]
-    v_right = np.sum(mask[:,x_max])/mask.shape[0]
-    h_top = np.sum(mask[y_min,:])/mask.shape[1]
-    h_bottom = np.sum(mask[y_max,:])/mask.shape[1]
-    """
+    # Compute straight edge lengths for bounding box edges
+    v_left = np.sum(mask[:, x_min])
+    v_right = np.sum(mask[:, x_max])
+    h_top = np.sum(mask[y_min, :])
+    h_bottom = np.sum(mask[y_max, :])
 
-   
-    """
-    # Get straight edges along image border
-    v_border_left = np.sum(mask[:,0])/mask.shape[0]
-    v_border_right = np.sum(mask[:,mask.shape[1]-1])/mask.shape[0]
-    h_border_top = np.sum(mask[0,:])/mask.shape[1]
-    h_border_bottom = np.sum(mask[mask.shape[0]-1,:])/mask.shape[1] 
-    """
+    # Candidate max straight edge length (in pixels)
+    max_length = max(v_left, v_right, h_top, h_bottom)
 
+    # Normalize by respective dimension lengths to get fraction
+    fractions = [
+        v_left / mask.shape[0],    # vertical edges normalized by height
+        v_right / mask.shape[0],
+        h_top / mask.shape[1],     # horizontal edges normalized by width
+        h_bottom / mask.shape[1]
+    ]
+    max_fraction = max(fractions)
 
-    df.loc[OID, "StraightEdge_longest"] = max(np.sum(mask[:,x_min]),  np.sum(mask[:,x_max]), np.sum(mask[y_min,:]), np.sum(mask[y_max,:]))
-    df.loc[OID, "StraightEdge_longest_fraction"] = max(np.sum(mask[:,x_min])/mask.shape[0],  np.sum(mask[:,x_max])/mask.shape[0], np.sum(mask[y_min,:])/mask.shape[1], np.sum(mask[y_max,:])/mask.shape[0-1])
+    # Store in row_data dict
+    row_data["StraightEdge_longest"] = max_length
+    row_data["StraightEdge_longest_fraction"] = max_fraction
 
-    return df
+    return row_data
 
-def shape_calc_mask(mask, df, OID, spacing):
+def shape_calc_mask(mask, row_data, OID, spacing):
     """
     Calculate various shape features for a segmented object.
 
     Parameters:
     - mask (numpy.ndarray): Binary mask representing the segmented object.
-    - df (pandas.DataFrame): DataFrame to store the calculated features.
-    - OID (str): Object ID for DataFrame indexing.
+    - row_data (dict): Dictionary to store the calculated features.
+    - OID (str): Object ID (kept for API consistency).
     - spacing (float): Pixel spacing.
+
+    Returns:
+    - row_data (dict): Updated with shape features.
     """
-        
-    # Set which regionprops features to calculate
+
+    # Define properties to calculate
     features = (
         'area',
         'area_bbox',
@@ -916,150 +953,175 @@ def shape_calc_mask(mask, df, OID, spacing):
         'moments',
         'perimeter',
         'solidity'
-        )
+    )
 
-    # Compute region properties
-    props = measure.regionprops_table(mask, properties=features, cache = True, spacing = (spacing, spacing))
+    # Compute region properties table (returns dict of arrays)
+    props = measure.regionprops_table(mask.astype(np.uint8), properties=features, spacing=(spacing, spacing), cache=True)
 
-    # Convert to a Pandas DataFrame
-    df_regionprops = pd.DataFrame(props, index = [OID])
-    
-    # Add to DF
-    df.loc[OID,list(df_regionprops)] = df_regionprops.loc[OID,:]
-    
-    # Calc additional features
-    df.loc[OID, "circularity"] = 4*math.pi*(df.loc[OID, "area"]/(df.loc[OID, "perimeter"]**2))
-    df.loc[OID, "AxisRatio"] = df.loc[OID, "axis_minor_length"]/df.loc[OID, "axis_major_length"]
-    
-    #Calc aspectRatio_equivalentDiameter from scMultipleX by Nicole Repina, Liberali Lab
-    df.loc[OID, "aspectRatio_equivalentDiameter"] = df.loc[OID, "axis_major_length"]/df.loc[OID, "equivalent_diameter_area"]
-    
-    return df
+    # Convert to DataFrame for easier access
+    df_props = pd.DataFrame(props, index=[OID])
 
-def channel_mask_feat_calc(mask, mask_channel, staining, df, OID, spacing):
-    
+    # Update row_data dictionary with all returned features
+    for col in df_props.columns:
+        row_data[col] = df_props.at[OID, col]
+
+    # Calculate additional features safely
+    perimeter = row_data.get("perimeter", np.nan)
+    area = row_data.get("area", np.nan)
+    axis_major = row_data.get("axis_major_length", np.nan)
+    axis_minor = row_data.get("axis_minor_length", np.nan)
+    equiv_diameter = row_data.get("equivalent_diameter_area", np.nan)
+
+    # Circularity: avoid division by zero
+    if np.isfinite(perimeter) and perimeter > 0 and np.isfinite(area):
+        row_data["circularity"] = 4 * math.pi * (area / (perimeter ** 2))
+    else:
+        row_data["circularity"] = np.nan
+
+    # Axis ratio: minor/major lengths
+    if np.isfinite(axis_minor) and np.isfinite(axis_major) and axis_major != 0:
+        row_data["AxisRatio"] = axis_minor / axis_major
+    else:
+        row_data["AxisRatio"] = np.nan
+
+    # Aspect ratio equivalent diameter
+    if np.isfinite(axis_major) and np.isfinite(equiv_diameter) and equiv_diameter != 0:
+        row_data["aspectRatio_equivalentDiameter"] = axis_major / equiv_diameter
+    else:
+        row_data["aspectRatio_equivalentDiameter"] = np.nan
+
+    return row_data
+
+def channel_mask_feat_calc(mask, mask_channel, staining, row_data, OID, spacing):
     """
     Calculate staining features related to the whole segmentation mask of an object.
 
     Parameters:
     - mask (numpy.ndarray): Binary mask representing the segmented object.
-    - mask_channel (numpy.ndarray): Binary mask representing a specific staining channel.
+    - mask_channel (numpy.ndarray): Binary mask for the specific staining channel.
     - staining (str): Name of the staining channel.
-    - df (pandas.DataFrame): DataFrame to store the calculated features.
-    - OID (str): Object ID for DataFrame indexing.
+    - row_data (dict): Row dictionary to update with calculated features.
+    - OID (str): Object ID (not used here but kept for API consistency).
     - spacing (float): Pixel spacing.
+
+    Returns:
+    - row_data (dict): Updated with new features.
     """
-            
+    # Only calculate features if mask_channel contains any positive pixel
     if np.max(mask_channel.astype(np.uint8)) > 0:
-        prop_mask_channel = measure.regionprops(mask_channel.astype(np.uint8), spacing = (spacing, spacing))[0]
-        prop_mask = measure.regionprops(mask.astype(np.uint8), spacing = (spacing, spacing))[0]
-        
-        df.loc[OID, staining+"_area_T"] = prop_mask_channel.area
-        df.loc[OID, staining+"_area_T_ratio"] = prop_mask_channel.area/prop_mask.area
-        df.loc[OID, staining+"_asymmetry"] = calculate_eucl_distance(prop_mask_channel.centroid[1], prop_mask_channel.centroid[0], prop_mask.centroid[1], prop_mask.centroid[0], spacing) / np.sqrt(prop_mask.area)
+        props_mask_channel = measure.regionprops(mask_channel.astype(np.uint8), spacing=(spacing, spacing))[0]
+        props_mask = measure.regionprops(mask.astype(np.uint8), spacing=(spacing, spacing))[0]
+
+        row_data[f"{staining}_area_T"] = props_mask_channel.area
+        row_data[f"{staining}_area_T_ratio"] = props_mask_channel.area / props_mask.area if props_mask.area != 0 else 0
+
+        # Calculate (normalized) asymmetry as Euclidean distance between centroids, divided by sqrt(area)
+        centroid_dist = calculate_eucl_distance(
+            props_mask_channel.centroid[1], props_mask_channel.centroid[0],
+            props_mask.centroid[1], props_mask.centroid[0],
+            spacing
+        )
+        row_data[f"{staining}_asymmetry"] = centroid_dist / np.sqrt(props_mask.area) if props_mask.area != 0 else 1
     else:
-        df.loc[OID, staining+"_area_T"] = 0
-        df.loc[OID, staining+"_area_T_ratio"] = 0
-        df.loc[OID, staining+"_asymmetry"] = 1
-    return df
-                  
-def convex_hull_features(mask, df, OID, spacing, min_area_fraction = 0.005):
+        row_data[f"{staining}_area_T"] = 0
+        row_data[f"{staining}_area_T_ratio"] = 0
+        row_data[f"{staining}_asymmetry"] = 1
+
+    return row_data
+
+def convex_hull_features(mask, row_data, OID, spacing, min_area_fraction=0.005):
     """
-    Calculate the number of concavities in an object above a minimum size.
+    Calculate the number of concavities in an object above a minimum size,
+    and shape-related convex hull features.
 
     Parameters:
     - mask (numpy.ndarray): Binary mask representing the segmented object.
-    - df (pandas.DataFrame): DataFrame to store the calculated features.
-    - OID (str): Object ID for DataFrame indexing.
+    - row_data (dict): Dictionary to store the calculated features.
+    - OID (str): Object ID (kept for API consistency; not used here).
     - spacing (float): Pixel spacing.
     - min_area_fraction (float): Minimum concavity area fraction.
 
-    Functions derived from the scMultipleX package by Nicole Repina, Liberali Lab: https://github.com/fmi-basel/gliberal-scMultipleX
+    Returns:
+    - row_data (dict): Updated dict with calculated features.
     """
-    
-    # Regionprops of mask to get needed features
-    prop_2D = measure.regionprops(mask, spacing = (spacing,spacing))[0]
-    
-    
+    prop_2D = measure.regionprops(mask, spacing=(spacing, spacing))[0]
+
     object_image = prop_2D.image
     convex_image = prop_2D.convex_image
     object_area = prop_2D.area
 
-    diff_img = convex_image ^ object_image
+    diff_img = convex_image ^ object_image  # True where object is concave
 
-    # Concavity counting above minimum size
+    # Count concavities larger than min_area_fraction
+    concavity_cnt = 0
     if np.sum(diff_img) > 0:
         labeled_diff_img = measure.label(diff_img, connectivity=1)
-        concavity_feat = measure.regionprops(labeled_diff_img, spacing = (spacing,spacing))
-        concavity_cnt = 0
-        for concavity_2D in concavity_feat:
-            if (concavity_2D.area / object_area) > min_area_fraction:
+        concavity_props = measure.regionprops(labeled_diff_img, spacing=(spacing, spacing))
+        for concavity in concavity_props:
+            if (concavity.area / object_area) > min_area_fraction:
                 concavity_cnt += 1
-    else:
-        concavity_cnt = 0
-    
-    df.loc[OID, "concavity_count"] = concavity_cnt
-    
-    """Return the euclidian distance between the centroid of the object label
-    and the centroid of the convex hull
-    Normalize to the object area; becomes fraction of object composed of divots & indentations
-    """
+    row_data["concavity_count"] = concavity_cnt
 
-    # Use image that has same size as bounding box (not original seg)
-    object_image = prop_2D.image
+    # Calculate centroids from raw image moments for object and convex hull
     object_moments = measure.moments(object_image)
-    object_centroid = np.array([object_moments[1, 0] / object_moments[0, 0], object_moments[0, 1] / object_moments[0, 0]])
+    object_centroid = np.array([
+        object_moments[1, 0] / object_moments[0, 0],
+        object_moments[0, 1] / object_moments[0, 0]
+    ])
 
-    # Convex hull image has same size as bounding box
-    convex_image = prop_2D.convex_image
     convex_moments = measure.moments(convex_image)
-    convex_centroid = np.array([convex_moments[1, 0] / convex_moments[0, 0], convex_moments[0, 1] / convex_moments[0, 0]])
+    convex_centroid = np.array([
+        convex_moments[1, 0] / convex_moments[0, 0],
+        convex_moments[0, 1] / convex_moments[0, 0]
+    ])
 
-    # calculate 2-norm (Euclidean distance) and normalize
-    centroid_dist = np.linalg.norm(object_centroid - convex_centroid) / np.sqrt(prop_2D.area)
+    # Normalized Euclidean distance between centroids as asymmetry measure
+    centroid_dist = np.linalg.norm(object_centroid - convex_centroid) / np.sqrt(object_area)
+    row_data["asymmetry"] = centroid_dist
 
-    df.loc[OID, "asymmetry"] = centroid_dist
-    
-    """Return the normalized difference in area between the convex hull and area of the object
-    Normalize to the area of the convex hull
-    """
-    df.loc[OID, "concavity"] = (prop_2D.convex_area - prop_2D.area) / prop_2D.convex_area   
-    
-    return df
+    # Normalized area difference between convex hull and object as concavity metric
+    row_data["concavity"] = (prop_2D.convex_area - object_area) / prop_2D.convex_area
 
-def moments_channel_mask(mask, int_image, df, OID, staining, spacing):
+    return row_data
+
+def moments_channel_mask(mask, int_image, row_data, OID, staining, spacing):
     """
     Calculate moments-based features for a staining channel within the segmented object.
 
     Parameters:
     - mask (numpy.ndarray): Binary mask representing the segmented object.
     - int_image (numpy.ndarray): Intensity image corresponding to the staining channel.
-    - df (pandas.DataFrame): DataFrame to store the calculated features.
-    - OID (str): Object ID for DataFrame indexing.
+    - row_data (dict): Dict to update with calculated features.
+    - OID (str): Object ID, for API consistency.
     - staining (str): Name of the staining channel.
     - spacing (float): Pixel spacing.
+
+    Returns:
+    - row_data (dict): Updated with moments-based features.
     """
-        
-    # Set which regionprops features to calculate
-    features = (
-        'moments_weighted',
+    features = ('moments_weighted',)
+    
+    # Compute regionprops_table returns a dict of arrays
+    props = measure.regionprops_table(
+        mask.astype(np.uint8), 
+        intensity_image=int_image, 
+        properties=features, 
+        spacing=(spacing, spacing)
     )
-
-    # Compute region properties
-    props = measure.regionprops_table(mask, intensity_image = int_image, properties=features, cache =True, spacing = (spacing, spacing))
-
-    # Convert to a Pandas DataFrame
-    df_regionprops = pd.DataFrame(props, index = [OID])
     
-    # Rename to add staining name
-    df_regionprops.columns = [staining+"_"+x for x in list(df_regionprops)]
+    # Convert to DataFrame with single-row indexed by OID for convenience
+    df_props = pd.DataFrame(props, index=[OID])
     
-    # Add to DF
-    df.loc[OID,list(df_regionprops)] = df_regionprops.loc[OID,:]
+    # Rename columns to prefix with staining name
+    df_props.columns = [f"{staining}_{col}" for col in df_props.columns]
     
-    return df
+    # Update row_data dict with these features (extracting first row)
+    for col in df_props.columns:
+        row_data[col] = df_props.at[OID, col]
 
-def intensity_feat_calc(img, mask, mask_channel, df, staining, OID, quantiles_to_calc):
+    return row_data
+
+def intensity_feat_calc(img, mask, mask_channel, row_data, staining, OID, quantiles_to_calc):
     """
     Calculate intensity-based features for a staining channel within a segmented object.
 
@@ -1067,152 +1129,154 @@ def intensity_feat_calc(img, mask, mask_channel, df, staining, OID, quantiles_to
     - img (numpy.ndarray): Original intensity image.
     - mask (numpy.ndarray): Binary mask representing the segmented object.
     - mask_channel (numpy.ndarray): Binary mask representing a specific staining channel.
-    - df (pandas.DataFrame): DataFrame to store the calculated features.
+    - row_data (dict): Dictionary to store the calculated features.
     - staining (str): Name of the staining channel.
-    - OID (str): Object ID for DataFrame indexing.
-    - quantiles_to_calc (list): List of quantiles to calculate.
+    - OID (str): Object ID (kept for API consistency).
+    - quantiles_to_calc (list): List of quantiles to calculate (values between 0 and 1).
+    
+    Returns:
+    - row_data (dict): Updated with intensity-based features.
     """
 
-    #min
-    df.loc[OID, staining+"_min"] = np.min(img[mask.astype(bool)])
-    
-    if len(img[mask_channel.astype(bool)]) != 0:
-        df.loc[OID, staining+"_T_min"] = np.min(img[mask_channel.astype(bool)])
-    else: 
-        df.loc[OID, staining+"_T_min"] = 0
-        
-    #mean
-    df.loc[OID, staining+"_mean"] = np.mean(img[mask.astype(bool)])
-    
-    if len(img[mask_channel.astype(bool)]) != 0:
-        df.loc[OID, staining+"_T_mean"] = np.mean(img[mask_channel.astype(bool)])
-    else: 
-        df.loc[OID, staining+"_T_mean"] = 0
-        
-    #max
-    df.loc[OID, staining+"_max"] = np.max(img[mask.astype(bool)])
-    
-    if len(img[mask_channel.astype(bool)]) != 0:
-        df.loc[OID, staining+"_T_max"] = np.max(img[mask_channel.astype(bool)])
-    else: 
-        df.loc[OID, staining+"_T_max"] = 0        
+    # Mask indices with bool arrays once for efficiency
+    mask_bool = mask.astype(bool)
+    mask_chan_bool = mask_channel.astype(bool)
 
-    #std
-    df.loc[OID, staining+"_std"] = np.std(img[mask.astype(bool)])
-    
-    if len(img[mask_channel.astype(bool)]) != 0:
-        df.loc[OID, staining+"_T_std"] = np.std(img[mask_channel.astype(bool)])
-    else: 
-        df.loc[OID, staining+"_T_std"] = 0     
-        
-    #quantiles
+    img_masked = img[mask_bool]
+
+    # Basic intensity features in full mask
+    row_data[f"{staining}_min"] = np.min(img_masked) if img_masked.size > 0 else 0
+    row_data[f"{staining}_mean"] = np.mean(img_masked) if img_masked.size > 0 else 0
+    row_data[f"{staining}_max"] = np.max(img_masked) if img_masked.size > 0 else 0
+    row_data[f"{staining}_std"] = np.std(img_masked) if img_masked.size > 0 else 0
+
+    if np.any(mask_chan_bool):
+        img_mask_chan = img[mask_chan_bool]
+        row_data[f"{staining}_T_min"] = np.min(img_mask_chan)
+        row_data[f"{staining}_T_mean"] = np.mean(img_mask_chan)
+        row_data[f"{staining}_T_max"] = np.max(img_mask_chan)
+        row_data[f"{staining}_T_std"] = np.std(img_mask_chan)
+    else:
+        row_data[f"{staining}_T_min"] = 0
+        row_data[f"{staining}_T_mean"] = 0
+        row_data[f"{staining}_T_max"] = 0
+        row_data[f"{staining}_T_std"] = 0
+
+    # Quantiles for full mask and threshold mask_channel
     for q in quantiles_to_calc:
-        
         q_name = str(int(q * 100))
-        df.loc[OID, staining+"_Q"+q_name] = np.quantile(img[mask.astype(bool)], q = q)
+        row_data[f"{staining}_Q{q_name}"] = np.quantile(img_masked, q=q) if img_masked.size > 0 else 0
 
-        if len(img[mask_channel.astype(bool)]) != 0:
-            df.loc[OID, staining+"_T_Q"+q_name] = np.quantile(img[mask_channel.astype(bool)], q = q)
-        else: 
-            df.loc[OID, staining+"_T_Q"+q_name] = 0
-            
-    #potency
-    df.loc[OID, staining+"_potency"] = df.loc[OID, staining+"_mean"]*df.loc[OID, staining+"_area_T"]
-        
-    #substructures
+        if np.any(mask_chan_bool):
+            row_data[f"{staining}_T_Q{q_name}"] = np.quantile(img[mask_chan_bool], q=q)
+        else:
+            row_data[f"{staining}_T_Q{q_name}"] = 0
 
-    ## Threshold substructures
-    binary_image = img > filters.threshold_otsu(img)
-    
-    ## Label connected components
+    # Potency: mean intensity * area of T (thresholded mask)
+    area_T = np.sum(mask_chan_bool)
+    row_data[f"{staining}_area_T"] = area_T
+    row_data[f"{staining}_potency"] = row_data[f"{staining}_mean"] * area_T
+
+    # Substructure analysis
+
+    # Threshold image using Otsu method
+    try:
+        otsu_thresh = filters.threshold_otsu(img)
+    except Exception:
+        # fallback if Otsu fails (e.g. uniform image)
+        otsu_thresh = np.median(img)
+    binary_image = img > otsu_thresh
+
+    # Mask outside the segmented object: set to False
+    binary_image = np.logical_and(binary_image, mask_bool)
+
+    # Label connected components in binary image
     labeled_image, num_speckles = label(binary_image)
 
-    ## Focus on current object
-    binary_image[~mask.astype(bool)] == 0
-
-    ## Filter  small speckles
+    # Filter out small speckles (< 15 pixels)
     min_size = 15
-    filtered_speckles = np.zeros_like(labeled_image)
+    filtered_speckles = np.zeros_like(labeled_image, dtype=int)
     current_label = 1
 
     for i in range(1, num_speckles + 1):
         speckle_mask = labeled_image == i
-        speckle_size = np.sum(speckle_mask)
-        
-        if speckle_size >= min_size:
+        if np.sum(speckle_mask) >= min_size:
             filtered_speckles[speckle_mask] = current_label
             current_label += 1
 
-    ## Quantify remaining speckles
+    # Collect speckle sizes and intensities
     remaining_labels = np.unique(filtered_speckles)
-    remaining_labels = remaining_labels[remaining_labels != 0]  # Exclude background
+    remaining_labels = remaining_labels[remaining_labels != 0]  # exclude background
 
     speckle_sizes = []
     speckle_intensities = []
 
     for label_id in remaining_labels:
         speckle_mask = filtered_speckles == label_id
-        speckle_size = np.sum(speckle_mask)
-        speckle_intensity = np.mean(img[speckle_mask])
-        
-        speckle_sizes.append(speckle_size)
-        speckle_intensities.append(speckle_intensity)
+        speckle_sizes.append(np.sum(speckle_mask))
+        speckle_intensities.append(np.mean(img[speckle_mask]))
 
-    ## Save
-    df.loc[OID, staining+"_substructures_size"] = np.mean(speckle_sizes) if speckle_sizes else 0
-    df.loc[OID, staining+"_substructures_intensity"] = np.mean(speckle_intensities) if speckle_intensities else 0
-    df.loc[OID, staining+"_substructures_count"] = len(speckle_sizes)
+    # Store substructure features, fallback 0 if empty
+    row_data[f"{staining}_substructures_size"] = np.mean(speckle_sizes) if speckle_sizes else 0
+    row_data[f"{staining}_substructures_intensity"] = np.mean(speckle_intensities) if speckle_intensities else 0
+    row_data[f"{staining}_substructures_count"] = len(speckle_sizes)
 
-    return df
+    return row_data
 
-def intensity_pearsonR(stainings, experiment_setup, images, barcode, well, OID, df):
+def intensity_pearsonR(stainings, experiment_setup, images, barcode, well, OID, row_data):
     """
     Calculate Pearson correlation coefficients between staining channels within a segmented object.
 
     Parameters:
-    - stainings (dict): Dictionary mapping staining IDs to staining names.
-    - experiment_setup (dict): Dictionary containing experimental setup information.
-    - images (dict): Dictionary of staining channel images.
-    - barcode (str): Barcode identifier.
-    - well (str): Well identifier.
-    - OID (str): Object ID for DataFrame indexing.
-    - df (pandas.DataFrame): DataFrame to store the calculated features.
+    - stainings (dict): Mapping of staining IDs to staining names.
+    - experiment_setup (dict): Experimental setup info.
+    - images (dict): Dictionary of staining channel images, including 'Mask'.
+    - barcode (str): Barcode ID.
+    - well (str): Well ID.
+    - OID (str): Object ID (for API consistency).
+    - row_data (dict): Dictionary to store the calculated features.
+
+    Returns:
+    - row_data (dict) with PearsonR features added.
     """
-    # Set to keep track of seen pairs
+    # Cache the staining key list to avoid repeated indexing and splitting
+    staining_key_list = stainings[experiment_setup[barcode][well][1]]
+    n_channels = len(staining_key_list)
+
+    mask_bool = images["Mask"].astype(bool)
+
     seen_pairs = set()
 
-    # Loop through channels
-    for channel1 in range(len(stainings[experiment_setup["-".join(OID.split("-")[:-2])][OID.split("-")[-2]][1]])):
+    for ch1 in range(n_channels):
+        stain1 = staining_key_list[ch1]
+        img1 = images[f"C0{ch1 + 1}"][mask_bool]
+
+        for ch2 in range(ch1 + 1, n_channels):
+            stain2 = staining_key_list[ch2]
+            pair = frozenset([stain1, stain2])
+
+            if pair in seen_pairs:
+                continue
+
+            seen_pairs.add(pair)
+
+            img2 = images[f"C0{ch2 + 1}"][mask_bool]
+
+            # Handle edge cases: if either array is empty or constant, set correlation to NaN
+            if img1.size == 0 or img2.size == 0 or np.std(img1) == 0 or np.std(img2) == 0:
+                r = np.nan
+            else:
+                r = np.corrcoef(img1, img2)[0, 1]
+
+            # Sort stains alphabetically in feature name for consistency
+            key = f"{min(stain1, stain2)}-{max(stain1, stain2)}_PearsonR"
+            row_data[key] = r
+
+    return row_data
 
 
-        
-        # Get first staining
-        staining1 = stainings[experiment_setup[barcode][well][1]][channel1]
-            
-        # Loop through channels again to get other staining
-        for channel2 in range(len(stainings[experiment_setup["-".join(OID.split("-")[:-2])][OID.split("-")[-2]][1]])):
 
-            if channel1 != channel2:
-                
-                #Get second staining
-                staining2 = stainings[experiment_setup[barcode][well][1]][channel2]
-                
-                # Make a pair and check if it was already calculated
-                pair = frozenset([staining1, staining2]) #Use a frozenset for unordered pairs
-                if pair not in seen_pairs:
-                    seen_pairs.add(pair)
 
-                    # Return PearsonR
-                    r = np.corrcoef(images[f"C0{channel1+1}"][images["Mask"].astype(bool)], images[f"C0{channel2+1}"][images["Mask"].astype(bool)])[0, 1]
-
-                    # Add to DF
-                    if staining1 > staining2:
-                        df.loc[OID, "%s-%s_PearsonR"%(staining1, staining2)] = r
-                    else:
-                        df.loc[OID, "%s-%s_PearsonR"%(staining2, staining1)] = r
-    return df
-    
-def skeleton_feats(images, df, OID, spacing, sigma_skeleton, radius_multiplier = 0.5):   
     """
     Extract skeleton features from the provided binary mask image.
 
@@ -1304,7 +1368,91 @@ def skeleton_feats(images, df, OID, spacing, sigma_skeleton, radius_multiplier =
 
     return df
 
-def image_analysis(images, OID, df, quantiles_to_calc, sigma_skeleton, spacing, stainings, experiment_setup, radius_multiplier):
+    """
+    Extract skeleton features from the provided binary mask image.
+
+    Parameters:
+    - images (dict): Dictionary of images, including "Mask".
+    - row_data (dict): Dictionary to store the calculated features.
+    - OID (str): Object ID for dict indexing.
+    - spacing (float): Pixel spacing.
+    - sigma_skeleton (int): Sigma for Gaussian blur before skeletonization.
+    - radius_multiplier (float): Multiplier for max inscribed circle radius.
+
+    Returns:
+    - row_data (dict): Updated with skeleton features.
+    """
+    n_angle_determination = 50
+    image = images["Mask"]
+
+    # Gaussian blur and skeletonize with Lee's method (method="lee")
+    blurred_image = filters.gaussian(image, sigma=sigma_skeleton)
+    skeleton = morphology.skeletonize(blurred_image, method="lee")
+
+    # Get max inscribed circle on the mask
+    mask_circle, radius, center = get_max_inscribed_circle(image, radius_multiplier=radius_multiplier, value=255)
+
+    # Remove skeleton pixels inside the max inscribed circle
+    skeleton[mask_circle.astype(bool)] = 0
+
+    # Proceed if sufficient skeleton pixels exist
+    if np.sum(skeleton.astype(bool)) > 2:
+        skeleton_data = summarize(Skeleton(skeleton))
+        skeleton_data = skeleton_data[skeleton_data["branch-type"] != 2]
+
+        elongated_skeleton = np.copy(skeleton)
+        skeleton_int = np.copy(skeleton)
+
+        skeleton_data = define_center_touching_branches(skeleton_data, mask_circle)
+
+        # Remove branch-type 1 that touch the circle
+        skeleton_data = skeleton_data[~((skeleton_data["branch-type"] == 1) & (skeleton_data["Touching"] == 1))]
+
+        # Determine skeleton endpoints and elongate skeleton
+        skeleton_data = determine_skeleton_endpoints(skeleton_data, center, spacing)
+
+        for row in skeleton_data.index:
+            start_y = int(skeleton_data.at[row, "endpoint-y"])
+            start_x = int(skeleton_data.at[row, "endpoint-x"])
+            adj_y, adj_x = start_y, start_x
+
+            for _ in range(n_angle_determination):
+                skeleton_int[adj_y, adj_x] = 0
+                adj_y, adj_x, _ = find_adjacent_nonzero_pixel((adj_y, adj_x), skeleton_int)
+
+            deg = calculate_angle((adj_x, adj_y), (start_x, start_y))
+            x_end, y_end = calculate_endpoint((start_x, start_y), deg, image)
+
+            skeleton_data.at[row, "x_end"] = x_end
+            skeleton_data.at[row, "y_end"] = y_end
+
+            elongated_skeleton = draw_line(elongated_skeleton, (start_x, start_y), (x_end, y_end))
+
+        # Re-summarize elongated skeleton
+        skeleton_data = summarize(Skeleton(elongated_skeleton))
+        skeleton_data = skeleton_data[skeleton_data["branch-type"] != 2]
+        skeleton_data = define_center_touching_branches(skeleton_data, mask_circle)
+
+        # Remove unwanted branches again (branchtype 1 touching circle and branchtype 2)
+        skeleton_data = skeleton_data[~((skeleton_data["branch-type"] == 1) & (skeleton_data["Touching"] == 1))]
+
+        # Extract features
+        crypt_number = len(skeleton_data)
+        crypt_length_total = np.sum(skeleton_data["branch-distance"]) * spacing if crypt_number > 0 else 0
+        longest_crypt = np.max(skeleton_data["branch-distance"]) * spacing if crypt_number > 0 else 0
+
+    else:
+        crypt_number = 0
+        crypt_length_total = 0
+        longest_crypt = 0
+
+    # Store features in row_data dictionary
+    row_data["crypt_count"] = crypt_number
+    row_data["crypt_length_total"] = crypt_length_total
+    row_data["crypt_length_max"] = longest_crypt
+
+    return row_data
+
     """
     Perform image analysis tasks.
 
@@ -1362,7 +1510,62 @@ def image_analysis(images, OID, df, quantiles_to_calc, sigma_skeleton, spacing, 
     
     return df
 
-def extract_features(ome_zarrs_dict, ome_zarrs_df, table_name, label_name, pyramid_level, source, folder, analysis_dir, barcodes, experiment_setup, thresholds, stainings, result_file_name, radius_multiplier, sigma_skeleton, quantiles_to_calc):
+def image_analysis(images, OID, row_data, quantiles_to_calc, sigma_skeleton, spacing, stainings, experiment_setup,radius_multiplier):
+    """
+    Perform image analysis tasks and accumulate features in a row_data dict.
+
+    Parameters:
+    - images (dict): Dictionary of images.
+    - OID (str): Object ID for dict storage.
+    - row_data (dict): Dict where calculated features will be stored.
+    - quantiles_to_calc (list): Quantiles to calculate for intensity features.
+    - sigma_skeleton (int): Sigma param for Gaussian blurring before skeletonization.
+    - spacing (float): Pixel spacing.
+    - stainings (dict): Mapping from staining IDs to staining names.
+    - experiment_setup (dict): Experimental setup info.
+    - radius_multiplier (float): Multiplier for skeleton features.
+
+    Returns:
+    - row_data (dict): Updated dictionary including all calculated features.
+    """
+    # Parse barcode and well from OID just once
+    barcode = "-".join(OID.split("-")[:-2])
+    well = OID.split("-")[-2]
+
+    # Shape features from mask
+    row_data = shape_calc_mask(images["Mask"], row_data, OID, spacing)
+
+    # Convex hull features (area, solidity, etc.)
+    row_data = convex_hull_features(images["Mask"], row_data, OID, spacing, min_area_fraction=0.005)
+
+    # Border fraction for filtering
+    row_data = get_border_fraction(images["Mask"], row_data, OID)
+
+    # Skeleton features (e.g., skeleton length, branch points, etc.)
+    row_data = skeleton_feats(images, row_data, OID, spacing, sigma_skeleton, radius_multiplier)
+
+    # Quickly resolve channel count and stainings for this well
+    staining_key = experiment_setup[barcode][well][1]
+    stain_names = stainings[staining_key]
+
+    # Loop through channels
+    for ch_idx, stain in enumerate(stain_names):
+        channel = f"C0{ch_idx+1}"
+        # Prepare copies for safety (should be only if needed)
+        image = copy.deepcopy(images[channel])
+        mask = copy.deepcopy(images["Mask"])
+        mask_channel = copy.deepcopy(images.get(channel+"_Mask", mask))
+
+        # Calculate channel-specific features
+        row_data = channel_mask_feat_calc(mask, mask_channel, stain, row_data, OID, spacing)
+        row_data = intensity_feat_calc(image, mask, mask_channel, row_data, stain, OID, quantiles_to_calc)
+        row_data = moments_channel_mask(mask, image, row_data, OID, stain, spacing)
+
+    # Pearson correlation coefficients for all combinations of intensities (across stains/channels)
+    row_data = intensity_pearsonR(stainings, experiment_setup, images, barcode, well, OID, row_data)
+
+    return row_data
+
     """
     Extract features from organoid images and save results in CSV and AnnData format.
 
@@ -1447,7 +1650,13 @@ def extract_features(ome_zarrs_dict, ome_zarrs_df, table_name, label_name, pyram
                     df.loc[OID, "Medium"] = experiment_setup["-".join(OID.split("-")[:-2])][OID.split("-")[-2]][0]
                     df.loc[OID, "ABs"] = experiment_setup["-".join(OID.split("-")[:-2])][OID.split("-")[-2]][1]
                     df.loc[OID, "PATH"] = PATH
-
+                    df.loc[OID, "y_micrometer"] = row.y_micrometer
+                    df.loc[OID, "x_micrometer"] = row.x_micrometer
+                    df.loc[OID, "len_y_micrometer"] = row.len_y_micrometer
+                    df.loc[OID, "len_x_micrometer"] = row.len_x_micrometer
+                    df.loc[OID, "centroid_y_micrometer"] = row.y_micrometer + row.len_y_micrometer/2
+                    df.loc[OID, "centroid_x_micrometer"] = row.x_micrometer + row.len_x_micrometer/2
+                    
                     for channel in range(len(stainings[experiment_setup["-".join(OID.split("-")[:-2])][OID.split("-")[-2]][1]])):   
 
                         df.loc[OID, "Staining_Ch"+str(channel+1)] = stainings[experiment_setup["-".join(OID.split("-")[:-2])][OID.split("-")[-2]][1]][channel]
@@ -1493,11 +1702,8 @@ def extract_features(ome_zarrs_dict, ome_zarrs_df, table_name, label_name, pyram
         df_total = pd.concat([df_total, df])
             
     # Create Analysis directory if not present
-    for folder in ["1_Scripts", "2_Tables", "3_Plots", "4_Results"]:
-        path = os.path.join(analysis_dir, folder)
-        
-        if os.path.exists(path)==False:
-            os.makedirs(path)
+    for subfolder in ["1_Scripts", "2_Tables", "3_Plots", "4_Results"]:
+        os.makedirs(os.path.join(analysis_dir, subfolder), exist_ok=True)
 
     # Save complete DF and AnnData
     total_save_path = os.path.join(analysis_dir, "2_Tables", result_file_name+"_{date:%Y-%m-%d_%Hh%Mmin%Ss}".format(date=datetime.datetime.now())+".csv")
@@ -1541,4 +1747,195 @@ def extract_features(ome_zarrs_dict, ome_zarrs_df, table_name, label_name, pyram
 
     # Save AD
     save_adata(os.path.join(analysis_dir, "2_Tables"), result_file_name+"_{date:%Y-%m-%d_%Hh%Mmin%Ss}".format(date=datetime.datetime.now()), ad)
-   
+
+def build_row(OID, bc, well, row, exp_info, PATH, stainings, experiment_ID):
+    row_dict = {
+        "Organoid_ID": OID,
+        "Barcode": bc,
+        "Well": well,
+        "Object": OID.split("-")[-1],
+        "Medium": exp_info[0],
+        "ABs": exp_info[1],
+        "PATH": PATH,
+        "y_micrometer": row.y_micrometer,
+        "x_micrometer": row.x_micrometer,
+        "len_y_micrometer": row.len_y_micrometer,
+        "len_x_micrometer": row.len_x_micrometer,
+        "centroid_y_micrometer": row.y_micrometer + row.len_y_micrometer / 2.0,
+        "centroid_x_micrometer": row.x_micrometer + row.len_x_micrometer / 2.0,
+        "Cell_line": exp_info[2],
+        "Other": exp_info[3],
+        "Experiment_ID": experiment_ID
+    }
+    ab_key = exp_info[1]  # e.g. 'ABs'
+    for ch_idx, ch_name in enumerate(stainings.get(ab_key, [])):
+        row_dict[f"Staining_Ch{ch_idx+1}"] = ch_name
+    return row_dict
+    
+def extract_features(
+    ome_zarrs_dict,
+    table_name,
+    label_name,
+    pyramid_level,
+    source,
+    folder,
+    analysis_dir,
+    barcodes,
+    experiment_setup,
+    thresholds,
+    stainings,
+    result_file_name,
+    radius_multiplier,
+    sigma_skeleton,
+    quantiles_to_calc,
+    experiment_ID
+):
+    """
+    Optimized: Extract features from organoid images and save results in CSV and AnnData format.
+    """
+    # Prepare timestamp string once
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%Hh%Mmin%Ss")
+    df_total_list = []
+
+    # Create required output folders (robust to existing dirs)
+    for subfolder in ["1_Scripts", "2_Tables", "3_Plots", "4_Results"]:
+        os.makedirs(os.path.join(analysis_dir, subfolder), exist_ok=True)
+
+    # -------- Main barcode loop ----------
+    for i, bc in enumerate(tqdm(ome_zarrs_dict.keys(), desc="Barcodes")):
+        plate = ome_zarrs_dict[bc]
+        well_names = plate.get_names()
+        wells_in_exp = experiment_setup[bc]
+        # For efficient row accumulation:
+        rows = []
+
+        for well_idx, well in enumerate(tqdm(well_names, desc=f"Wells ({bc})", leave=False)):
+            if well not in wells_in_exp:
+                continue
+
+            exp_info = wells_in_exp[well]
+            well_ov = plate.images[well_idx]
+            table = well_ov.get_table(table_name)
+            pixel_spacing = well_ov.get_scale(pyramid_level=pyramid_level)[-1]  # Cache per well
+
+            if table.empty:
+                print(f"No table {table_name} for well {well} in barcode {bc}. Skipping.")
+                continue
+
+            for row_idx, row in enumerate(table.itertuples()):
+                # --------- Smart array loading: ---------
+                try:
+                    img, mask = well_ov.get_array_pair_by_coordinate(
+                        label_name=label_name,
+                        pyramid_level=pyramid_level,
+                        upper_left_yx=(row.y_micrometer, row.x_micrometer),
+                        lower_right_yx=(row.y_micrometer+row.len_y_micrometer, row.x_micrometer+row.len_x_micrometer)
+                    )
+                except Exception as e:
+                    print(f"Error retrieving arrays for {bc}, well {well}, organoid {row_idx}: {e}")
+                    continue
+
+                OID = f"{bc}-{well}-{row_idx}"
+                PATH = well_ov.get_path()
+                # --------- Prepare images dict ---------
+                images = {f"C0{channel+1}": img[channel, 0] for channel in range(img.shape[0])}
+                mask_arr = mask[label_name][0]
+                mask_for_oid = (mask_arr == int(row_idx)+1).astype(mask_arr.dtype)
+                images["Mask"] = mask_for_oid
+
+                # --- Label check, only process single-labeled organoids ---
+                n_labels = np.max(measure.label(mask_for_oid.astype(bool)))
+                if n_labels != 1:
+                    print(f"Skipping {getattr(row, 'UID', OID)} because it contains multiple labels. Expected one label per organoid.")
+                    continue
+
+                # --- Build observation row ---
+                row_dict = build_row(OID, bc, well, row, exp_info, PATH, stainings, experiment_ID)
+
+                # --- Pre-process images ---
+                try:
+                    images = image_preprocessing(
+                        stainings, experiment_setup, images, OID, thresholds, sigma=3
+                    )
+                except Exception as e:
+                    print(f"Error in image_preprocessing for {OID}: {e}")
+                    continue
+
+                # --- Calculate features and update row dict ---
+                try:
+                    row_dict = image_analysis(
+                        images=images,
+                        OID=OID,
+                        row_data=row_dict,
+                        quantiles_to_calc=quantiles_to_calc,
+                        sigma_skeleton=sigma_skeleton,
+                        spacing=pixel_spacing,
+                        stainings=stainings,
+                        experiment_setup=experiment_setup,
+                        radius_multiplier=radius_multiplier
+                        )
+                except Exception as e:
+                    print(f"Error in image_analysis for {OID}: {e}")
+                    continue
+
+                rows.append(row_dict)
+
+        # ---- Build DataFrame for this plate ----
+        if not rows:
+            print(f"No valid rows for barcode {bc}.")
+            continue
+        df = pd.DataFrame(rows)
+
+        # --- Remove moments-0-0 columns ---
+        df = df.drop(columns=[col for col in df.columns if "moments-0-0" in col or "moments_weighted-0-0" in col], errors="ignore")
+
+        # --- Save per-plate DF ---
+        df = df.sort_values(by="Organoid_ID", key=natsort_keygen())
+        save_path = os.path.join(source, folder[i], f"{result_file_name}_{barcodes[i]}_{timestamp}.csv")
+        df.to_csv(save_path)
+        print(f"Saved {bc} results as {save_path}.")
+
+        df_total_list.append(df)
+
+    # --- Merge all plates ---
+    if not df_total_list:
+        raise ValueError("No features extracted for any barcode; check your input data.")
+    df_total = pd.concat(df_total_list, axis=0)
+
+    # --- Save merged DataFrame and AnnData ---
+    total_save_path = os.path.join(analysis_dir, "2_Tables", f"{result_file_name}_{timestamp}.csv")
+    df_total = df_total.set_index("Organoid_ID", drop=False)
+    df_total.to_csv(total_save_path)
+    print(f"Saved merged csv as {total_save_path}.")
+
+    # --- Compose AnnData ---
+    feats_categorical = [
+        "Organoid_ID", "Barcode", "Well", "Object", "Medium",
+        "ABs", "Cell_line", "Other", "PATH", "Experiment_ID"
+    ]
+    feats_categorical += [col for col in df_total.columns if col.startswith("Staining_")]
+    feats_numerical = [col for col in df_total.columns if col not in feats_categorical]
+
+    ad = anndata.AnnData(
+        X=df_total[feats_numerical].values,
+        obs=df_total.loc[:, feats_categorical],
+        var=pd.DataFrame(index=feats_numerical)
+    )
+
+    ad.uns["stainings"] = stainings
+    ad.uns["experiment_setup"] = experiment_setup
+    ad.uns["pixel_spacing"] = pixel_spacing
+    ad.uns["pyramid_level"] = pyramid_level
+    ad.uns["folders"] = folder
+    ad.uns["source_dir"] = source
+    ad.uns["table_dir"] = os.path.join(analysis_dir, "2_Tables")
+    ad.uns["plot_dir"] = os.path.join(analysis_dir, "3_Plots")
+    ad.uns["table_name"] = table_name
+    ad.uns["label_name"] = label_name
+    ad.uns["thresholds"] = {k: v[2] for k, v in thresholds.items()}
+
+    save_adata(
+        ad,
+        f"{result_file_name}_{timestamp}",
+    )
+    return ad

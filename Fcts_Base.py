@@ -4,12 +4,48 @@ from natsort import natsorted
 from ez_zarr import ome_zarr
 import pandas as pd
 import glob
-
+import anndata
 """
 ***
 BASE FUNCTIONS
 ***
 """
+
+def remove_uns(ad, keys_to_remove):
+
+    for key in keys_to_remove:
+        if key in ad.uns:
+            ad.uns.pop(key)
+
+    return ad
+
+def add_zarr_uns(ad):
+
+    ome_zarr_dict, ome_zarr_df =  extract_ome_zarr_tables(ad.uns["experiment_setup"],ad.uns["source_dir"], ad.uns["folders"], ad.uns["table_name"])
+
+    # Attach in-memory ome_zarr_dict to AnnData .uns (DO NOT save this inside AnnData file!)
+    ad.uns["ome_zarr_dict"] = ome_zarr_dict
+    ad.uns["ome_zarr_df"] = ome_zarr_df
+    return ad
+
+def load_adata(adata_path):
+    """
+    Load an AnnData object from disk, then reconstruct only the ome_zarr_dict from source folders,
+    and attach the ome_zarr_dict to adata.uns for runtime use.
+
+    Parameters:
+    - adata_path (str): Path to the saved AnnData (.h5ad) file.
+
+    Returns:
+    - adata (anndata.AnnData): Loaded AnnData with ome_zarr_dict attached in adata.uns.
+    """
+
+    # Load AnnData from disk without ome_zarr_dict stored
+    ad = anndata.read_h5ad(adata_path)
+
+    ad = add_zarr_uns(ad)
+    
+    return ad
 
 def save_df(path, filename, df):
     """
@@ -35,30 +71,44 @@ def save_df(path, filename, df):
     df.to_csv(savepath, index=False)
     print(f"Saved as:\n{savepath}")
 
-def save_adata(path, filename, adata):
+def save_adata(adata, filename, keys_to_remove = ["ome_zarr_dict", "ome_zarr_df"]):
     """
-    Save an AnnData object to an h5ad file with a unique filename.
+    Save an AnnData object to an h5ad file with a unique filename,
+    removing `ome_zarr_dict` (and optionally other keys) from .uns before saving.
 
     Parameters:
-    - path (str): Directory path for saving the file.
+    - path (str): Directory path to save the file.
     - filename (str): Base filename (without extension).
-    - adata (anndata.AnnData): AnnData object to be saved.
-
-    Derived from Suppinger et al., 2023 (https://doi.org/10.1016/j.stem.2023.04.018)
+    - adata (anndata.AnnData): AnnData object to save.
+    - keys_to_remove (list or None): List of keys to remove from adata.uns before saving.
+                                    Default ["ome_zarr_dict", "ome_zarr_df"], can be None to skip removal.
     """
 
+    path = adata.uns["table_dir"]
     if not os.path.exists(path):
         os.makedirs(path)
 
     savepath = os.path.join(path, filename + ".h5ad")
     i = 0
 
-    # Find unique save path
+    # Find unique save path to avoid overwriting
     while os.path.exists(savepath):
         i += 1
-        savepath = os.path.join(path, filename + str(i) + ".h5ad")
+        savepath = os.path.join(path, f"{filename}{i}.h5ad")
 
-    adata.write(savepath, compression="gzip")
+    # Backup keys to remove to restore later
+    backup = {}
+    for key in keys_to_remove:
+        if key in adata.uns:
+            backup[key] = adata.uns.pop(key)
+
+    try:
+        adata.write(savepath, compression="gzip")
+    finally:
+        # Restore removed keys regardless of success or error to avoid mutation side effects
+        for key, val in backup.items():
+            adata.uns[key] = val
+
     print(f"Saved as:\n{savepath}")
 
 def save_fig(fig, path, filename, dpi=300):
@@ -70,28 +120,25 @@ def save_fig(fig, path, filename, dpi=300):
     - path (str): Directory path for saving the files.
     - filename (str): Base filename (without extension).
     - dpi (int): Dots per inch for the figure resolution (default is 300).
-
-    Derived from Suppinger et al., 2023 (https://doi.org/10.1016/j.stem.2023.04.018)
     """
-
     if not os.path.exists(path):
         os.makedirs(path)
 
     savepath_pdf = os.path.join(path, filename + ".pdf")
     savepath_png = savepath_pdf.replace(".pdf", ".png")
-    i = 0
+    i = 1
 
     # Find unique save path
     while os.path.exists(savepath_pdf) or os.path.exists(savepath_png):
         i += 1
-        savepath_pdf = os.path.join(path, filename + str(i) + ".pdf")
+        savepath_pdf = os.path.join(path, filename +"_"+str(i) + ".pdf")
         savepath_png = savepath_pdf.replace(".pdf", ".png")
 
     fig.savefig(savepath_pdf, transparent=True, dpi=dpi, bbox_inches="tight")
     fig.savefig(savepath_png, transparent=True, dpi=dpi, bbox_inches="tight")
     print(f"Saved as:\n{savepath_pdf}\nand\n{savepath_png}")
 
-def save_after_filtering(save_dir, df, df_raw, ad_raw):
+def save_after_filtering(df, df_raw, ad_raw, save_dir = None):
     """
     Save the filtered DataFrame, updated AnnData object, and a list of deleted organoid IDs.
 
@@ -101,8 +148,15 @@ def save_after_filtering(save_dir, df, df_raw, ad_raw):
     - ad_raw (anndata.AnnData): Original AnnData object.
     """
 
+    save_dir = ad_raw.uns["table_dir"]
+
     # Save DF
     save_df(save_dir, "2_FeaturesFiltered"+"_{date:%Y-%m-%d_%Hh%Mmin%Ss}".format(date=datetime.datetime.now()), df)
+
+    keys_to_remove = ["ome_zarr_dict", "ome_zarr_df"]
+    for key in keys_to_remove:
+        if key in ad_raw.uns:
+            ad_raw.uns.pop(key)
 
     # Filter anndata
     ad = ad_raw[df.index,:].copy()
@@ -112,7 +166,6 @@ def save_after_filtering(save_dir, df, df_raw, ad_raw):
 
     # Save AnnData object
     save_adata(save_dir, "2_FeaturesFiltered", ad)
-
 
 def load_img_mask_by_UID(UID, ome_zarr_dict, table_name, label_name, pyramid_level, channel):
     """
@@ -253,7 +306,6 @@ def find_zarr_dirs(root_dir, max_depth=None):
 
     return natsorted(zarr_dirs)
 
-
 def find_staining_in_ABs(stainings, staining_to_find):
     """
     Finds the AB mixes that contain the given staining.
@@ -283,7 +335,6 @@ def find_barcodes_with_day(experiment_setup, d_string):
                 found_barcodes.append(barcode)
                 break
     return found_barcodes   
-
 
 def extract_ome_zarr_tables(experiment_setup, source, folder, table_name):
 
@@ -438,7 +489,6 @@ def get_pipetting_info(source, layout_sheet="StainingLayout"):
     for l in out_lines:
         print(l)
     return None
-
 
 def get_stainings(source, sheet="StainingLayout"):
     """

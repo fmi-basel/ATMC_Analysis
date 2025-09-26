@@ -1,6 +1,6 @@
 import matplotlib.pyplot as plt
 import random
-
+import math
 from Fcts_Base import load_img_mask_by_UID
 
 """
@@ -9,162 +9,176 @@ FILTERING FUNCTIONS
 ***
 """
 
-def filter_organoids_by(ad, df, feature, values, channel, pyramid_level = 1):
+def filter_organoids_by(ad, df, feature, values, channel, pyramid_level=1):
     """
     Filter organoids based on a specified numerical feature range and visualize the removed organoids.
 
     Parameters:
     - ad (anndata.AnnData): Input AnnData object.
-    - df (pd.DataFrame): Input DataFrame containing organoid information.
+    - df (pandas.DataFrame): Input DataFrame containing organoid information. Its index should correspond to organoid IDs.
     - feature (str): Name of the numerical feature to filter.
-    - values (tuple): Tuple containing two numerical values representing the lower and upper bounds for filtering.
+    - values (tuple): Tuple (lower_bound, upper_bound) for filtering bounds.
+    - channel (int): Channel index for image visualization.
+    - pyramid_level (int): Pyramid level of images for visualization.
     """
+    lower_bound, upper_bound = values
 
+    # Apply filter
+    mask_lower = df[feature] >= lower_bound
+    mask_upper = df[feature] <= upper_bound
+    mask = mask_lower & mask_upper
+    df_filtered = df[mask]
 
-    df_cut1 = df[df[feature] >= values[0]]
-    df_cut2 = df_cut1[df_cut1[feature] <= values[1]]
-    print(f"{len(df)-len(df_cut1)} objects removed due to lower boundary ({values[0]}) of {feature}.\n{len(df_cut1)-len(df_cut2)} objects removed due to upper boundary ({values[1]}) of {feature}.\n{len(df_cut2)} objects remain.")
+    n_removed_lower = (~mask_lower).sum()
+    n_removed_upper = mask_lower.sum() - mask.sum()
+    print(f"{n_removed_lower} objects removed due to lower boundary ({lower_bound}) of {feature}.")
+    print(f"{n_removed_upper} objects removed due to upper boundary ({upper_bound}) of {feature}.")
+    print(f"{len(df_filtered)} objects remain after filtering.")
 
-    rows, cols = (4,9)
-    if len(df)-len(df_cut1) > 0:
-        if len(df)-len(df_cut1) < cols:
-            rows = 1
-            while len(df)-len(df_cut1) < cols:
-                cols -= 1
+    # Visualize removed due to lower boundary
+    if n_removed_lower > 0:
+        removed_lower = df.index.difference(df_filtered.index)
+        n_lower = len(removed_lower)
+        rows_lower = 1 if n_lower < 9 else min(4, math.ceil(n_lower / 9))
+        cols_lower = min(9, n_lower) if rows_lower == 1 else 9
+        fig1 = get_deleted_organoids(ad, df.loc[removed_lower], df_filtered, rows_lower, cols_lower,
+                                    f"Objects with {feature} < {lower_bound}", feature, channel, pyramid_level)
+    else:
+        fig1 = None
 
-            fig1 = get_deleted_organoids(ad, df, df_cut1, rows, cols, f"Objects with {feature} <= {values[0]}", feature, channel, pyramid_level)
-        else:
-            while len(df)-len(df_cut1) < cols*rows:
-                rows -= 1
+    # Visualize removed due to upper boundary
+    if n_removed_upper > 0:
+        removed_upper = df_filtered.index.difference(df.index[mask_lower])
+        n_upper = len(removed_upper)
+        rows_upper = 1 if n_upper < 9 else min(4, math.ceil(n_upper / 9))
+        cols_upper = min(9, n_upper) if rows_upper == 1 else 9
+        fig2 = get_deleted_organoids(ad, df.loc[removed_upper], df_filtered, rows_upper, cols_upper,
+                                    f"Objects with {feature} > {upper_bound}", feature, channel, pyramid_level)
+    else:
+        fig2 = None
 
-            fig1 = get_deleted_organoids(ad, df, df_cut1, rows, cols, f"Objects with {feature} <= {values[0]}", feature, channel, pyramid_level)
+    return df_filtered
 
-    rows, cols = (4,9)
-
-    if len(df_cut1)-len(df_cut2) > 0:
-        if len(df_cut1)-len(df_cut2) < cols:
-            rows = 1
-            while len(df_cut1)-len(df_cut2) < cols:
-                cols -= 1
-
-            fig2 = get_deleted_organoids(ad, df_cut2, df_cut1, rows, cols,f"Objects with {feature} >= {values[1]}", feature, channel, pyramid_level)
-        else:
-            while len(df_cut1)-len(df_cut2) < cols*rows:
-                rows -= 1
-
-            fig2 = get_deleted_organoids(ad, df_cut2, df_cut1, rows, cols,f"Objects with {feature} >= {values[1]}", feature, channel, pyramid_level)
-    
-    return df_cut2
-
-def get_deleted_organoids(ad, df1, df2, rows, cols, title, feature, channel, pyramid_level):
+def get_deleted_organoids(ad, df_removed, df_filtered, rows, cols, title, feature, channel, pyramid_level):
     """
-    Plot organoids that are unique to one Dataframe. Used to get organoids which have been deleted during the filtering step.
+    Plot organoids that are unique to one DataFrame; used to visualize organoids removed during filtering.
 
     Parameters:
     - ad (anndata.AnnData): Input AnnData object.
-    - df1 (pandas.DataFrame): DataFrame2.
-    - df2 (pandas.DataFrame): DataFrame1.
-    - rows (int): Number of rows in the plot.
-    - cols (int): Number of columns in the plot.
-    - title (str): Title for the plot.
-    - feature (str): Feature to be displayed in the title of each sub-plot.
-    - pyramid_level (int): Pyramid level of the image.
+    - df_removed (pandas.DataFrame): DataFrame of removed organoids to visualize.
+    - df_filtered (pandas.DataFrame): DataFrame of kept organoids for comparison (may not be used directly).
+    - rows (int): Number of rows in the plot grid.
+    - cols (int): Number of columns in the plot grid.
+    - title (str): Title of the plot.
+    - feature (str): Feature name to display in subplot titles.
+    - channel (int): Channel index for image visualization.
+    - pyramid_level (int): Pyramid level for visualization.
     """
+    if df_removed.empty:
+        return None
 
-    # Check which DataFrame is longer
-    if len(df1) >= len(df2):
-        df_long = df1
-        df_short = df2
+    n_display = min(rows * cols, len(df_removed))
+    sample_removed = df_removed.sample(n=n_display)
+    OIDs = sample_removed.index.tolist()
+    feature_values = sample_removed[feature].tolist()
+
+    fig, axes = plt.subplots(rows, cols, figsize=(cols * 2, rows * 2))
+    fig.suptitle(title, fontsize=18, y=1.01)
+
+    # Flatten axes array for easy indexing even if rows=1 or cols=1
+    if rows == 1 and cols == 1:
+        axes_flat = [axes]
+    elif rows == 1 or cols == 1:
+        axes_flat = axes.flatten() if hasattr(axes, 'flatten') else axes
     else:
-        df_long = df2
-        df_short = df1
-    
-    # Get list of missing organoids in shorter compared to longer DataFrame
-    dropped = []
-    for x in df_long.index:
-        if x not in df_short.index:
-            dropped.append(x)
-    df = df_long[df_long.index.isin(dropped)]
-    if len(df) == 0:
-        return
-    n = rows*cols
-    
-    if rows*cols > len(df):
-        n = len(df)
-    
-    # Sample n (row*cols) random organoids of the deleted ones and plot
-    removed = df.sample(n=n)
-    removed_OID = list(removed.Organoid_ID)
-    
-    removed.Object =  removed.Object.astype(str)
-    removed_filt = list(removed[feature])
-    
-    fig, ax = plt.subplots(rows, cols, figsize = (cols*2,rows*2))
-    fig.suptitle(title, fontsize = 18, y = 1.01)
-    i = 0
-    for row in range(rows):
-        for col in range(cols):
-            if  rows == 1:
-                coordinates = col
-            else:
-                coordinates = row,col
+        axes_flat = axes.flatten()
 
-            img, mask = load_img_mask_by_UID(removed_OID[i], ad.uns["ome_zarr_dict"], ad.uns["table_name"], ad.uns["label_name"], pyramid_level, channel)
-
+    for i in range(rows * cols):
+        if i >= n_display:
+            axes_flat[i].axis('off')
+            continue
+        OID = OIDs[i]
+        try:
+            img, mask = load_img_mask_by_UID(OID, ad.uns["ome_zarr_dict"], ad.uns["table_name"],
+                                            ad.uns["label_name"], pyramid_level, channel)
+            img = img.copy()
             img[~mask.astype(bool)] = 0
-            ax[coordinates].imshow(img, interpolation = "nearest", aspect = "auto", cmap = "magma")
-            ax[coordinates].set_title(removed_OID[i]+"\n"+str(removed_filt[i]), fontsize = 8)
-            ax[coordinates].set_axis_off()
-            if i < n-1:
-                i += 1
-        
-    plt.tight_layout() 
+            axes_flat[i].imshow(img, interpolation="nearest", aspect="auto", cmap="magma")
+            axes_flat[i].set_title(f"{OID}\n{feature}: {feature_values[i]:.2f}", fontsize=8)
+            axes_flat[i].axis('off')
+        except Exception as e:
+            axes_flat[i].text(0.5, 0.5, f"Failed to load\n{OID}", ha='center', va='center')
+            axes_flat[i].axis('off')
+            print(f"Warning: failed to load image for {OID}: {e}")
 
+    plt.tight_layout()
     return fig
 
-def plot_random_organoids(ad, df_raw, df, feature, rows = 10, cols = 10, channel = 0, seed = 0, pyramid_level = 1):
+def plot_random_organoids(ad, df_raw, df, feature, rows=10, cols=10, channel=0, seed=0, pyramid_level=1):
     """
-    Plot random organoids from the DataFrame.
+    Plot random organoids surviving after filtering from the DataFrame.
 
     Parameters:
     - ad (anndata.AnnData): Input AnnData object.
-    - df_raw (pandas.DataFrame): DataFrame containing organoid information before filtering.
-    - df (pandas.DataFrame): DataFrame containing organoid information after filtering.
-    - feature (str): Feature to be displayed in the title of each sub-plot.
-    - rows (int): Number of rows in the plot.
-    - cols (int): Number of columns in the plot.
-    - seed (int): Seed for random sampling.
-    - pyramid_level (int): Pyramid level of the image.
+    - df_raw (pandas.DataFrame): DataFrame before filtering.
+    - df (pandas.DataFrame): DataFrame after filtering.
+    - feature (str): Feature to display in subplot titles.
+    - rows (int): Number of rows in subplot grid.
+    - cols (int): Number of columns in subplot grid.
+    - seed (int): Random seed for reproducibility.
+    - pyramid_level (int): Pyramid level for image loading.
     """
 
-    print("A total of %d objects have been removed during the filtering process. %d objects remain for further analysis.\n\n" %((len(df_raw)-len(df)), len(df)))
+    n_available = len(df)
+    n_requested = rows * cols
 
-    # Set seed
+    print(f"A total of {len(df_raw) - n_available} objects have been removed during the filtering process. "
+          f"{n_available} objects remain for further analysis.\n")
+
+    # Adjust grid size if fewer organoids than requested
+    if n_available < n_requested:
+        print(f"Only {n_available} objects available but grid requires {n_requested}. Adjusting grid size accordingly.")
+        n_to_plot = n_available
+        # Compute new rows and cols to have a nearly square layout
+        cols = min(cols, n_to_plot)
+        rows = math.ceil(n_to_plot / cols)
+    else:
+        n_to_plot = n_requested
+
     random.seed(seed)
+    sampled = df.sample(n=n_to_plot, replace=False, random_state=seed)
+    removed_OID = list(sampled.index)
+    removed_size = list(sampled[feature])
 
-    # Get n (row*cols) random organoids from DataFrame
-    removed = df.sample(n=rows*cols)
-    removed_path = list(removed.PATH)
-    removed_OID = list(removed.index)
-    removed_size = list(removed[feature])
+    fig, ax = plt.subplots(rows, cols, figsize=(cols*2, rows*2))
+    fig.suptitle("Surviving Organoids", fontsize=18, y=1.00)
 
-    fig, ax = plt.subplots(rows, cols, figsize = (rows*2,cols*2))
-    fig.suptitle("Surviving Organoids", fontsize = 18, y = 1.00)
+    # Flatten axes array for easy iteration regardless of shape
+    if rows == 1 and cols == 1:
+        axes_flat = [ax]
+    elif rows == 1 or cols == 1:
+        axes_flat = ax.flatten() if hasattr(ax, 'flatten') else ax
+    else:
+        axes_flat = ax.flatten()
 
-    i = 0
-
-    # Load images and plot
-    for row in range(rows):
-        for col in range(cols):
-
-            img, mask = load_img_mask_by_UID(removed_OID[i], ad.uns["ome_zarr_dict"], ad.uns["table_name"], ad.uns["label_name"], pyramid_level, channel)
-
+    for i in range(rows * cols):
+        if i >= n_to_plot:
+            # Turn off unused axes
+            axes_flat[i].axis('off')
+            continue
+        OID = removed_OID[i]
+        try:
+            img, mask = load_img_mask_by_UID(OID, ad.uns["ome_zarr_dict"], ad.uns["table_name"],
+                                            ad.uns["label_name"], pyramid_level, channel)
+            img = img.copy()
             img[mask == 0] = 0
-            ax[row,col].imshow(img, interpolation = "nearest", aspect = "auto", cmap = "magma")
-            ax[row,col].set_title(removed_OID[i]+"\n"+str(round(removed_size[i],2)), fontsize = 8)
-            ax[row,col].set_axis_off()
-            i += 1
+            axes_flat[i].imshow(img, interpolation="nearest", aspect="auto", cmap="magma")
+            axes_flat[i].set_title(f"{OID}\n{feature}: {round(removed_size[i], 2)}", fontsize=8)
+            axes_flat[i].axis('off')
+        except Exception as e:
+            axes_flat[i].text(0.5, 0.5, f"Failed to load\n{OID}", ha='center', va='center')
+            axes_flat[i].axis('off')
+            print(f"Warning: failed to load image for {OID}: {e}")
 
     fig.tight_layout()
-
     return fig
