@@ -1,10 +1,10 @@
-import os
-import datetime
 from natsort import natsorted
 from ez_zarr import ome_zarr
 import pandas as pd
-import glob
+import datetime
 import anndata
+import glob
+import os
 """
 ***
 BASE FUNCTIONS
@@ -28,7 +28,7 @@ def add_zarr_uns(ad):
     ad.uns["ome_zarr_df"] = ome_zarr_df
     return ad
 
-def load_adata(adata_path):
+def load_adata(adata_path, load_zarrs = False):
     """
     Load an AnnData object from disk, then reconstruct only the ome_zarr_dict from source folders,
     and attach the ome_zarr_dict to adata.uns for runtime use.
@@ -43,7 +43,9 @@ def load_adata(adata_path):
     # Load AnnData from disk without ome_zarr_dict stored
     ad = anndata.read_h5ad(adata_path)
 
-    ad = add_zarr_uns(ad)
+    if load_zarrs:
+        # Reconstruct ome_zarr_dict from source folders and attach to ad.uns
+        ad = add_zarr_uns(ad)
     
     return ad
 
@@ -165,7 +167,7 @@ def save_after_filtering(df, df_raw, ad_raw, save_dir = None):
     ad.uns["deleted_IDs"] = list(set(df_raw.index.to_list()) - set(df.index.to_list()))
 
     # Save AnnData object
-    save_adata(save_dir, "2_FeaturesFiltered", ad)
+    save_adata(ad, "2_FeaturesFiltered")
 
 def load_img_mask_by_UID(UID, ome_zarr_dict, table_name, label_name, pyramid_level, channel):
     """

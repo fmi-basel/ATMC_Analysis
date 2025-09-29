@@ -4,12 +4,12 @@ warnings.filterwarnings("ignore", message="ignoring keyword argument 'read_only'
 warnings.filterwarnings("ignore", category=UserWarning)
 warnings.filterwarnings("ignore", message=".*The 'nopython' keyword.*")
 
-from scipy.ndimage import label
 from skimage import filters, measure, morphology
 from natsort import natsorted, natsort_keygen
 from skan import Skeleton, summarize
 from IPython.display import display
 import matplotlib.pyplot as plt
+from scipy.ndimage import label
 from tqdm.notebook import tqdm
 import seaborn as sns
 import pandas as pd

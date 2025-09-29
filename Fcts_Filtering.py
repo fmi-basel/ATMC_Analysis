@@ -1,7 +1,7 @@
+from Fcts_Base import load_img_mask_by_UID
 import matplotlib.pyplot as plt
 import random
 import math
-from Fcts_Base import load_img_mask_by_UID
 
 """
 ***
@@ -30,14 +30,14 @@ def filter_organoids_by(ad, df, feature, values, channel, pyramid_level=1):
     df_filtered = df[mask]
 
     n_removed_lower = (~mask_lower).sum()
-    n_removed_upper = mask_lower.sum() - mask.sum()
+    n_removed_upper = (~mask_upper).sum()
     print(f"{n_removed_lower} objects removed due to lower boundary ({lower_bound}) of {feature}.")
     print(f"{n_removed_upper} objects removed due to upper boundary ({upper_bound}) of {feature}.")
     print(f"{len(df_filtered)} objects remain after filtering.")
 
     # Visualize removed due to lower boundary
     if n_removed_lower > 0:
-        removed_lower = df.index.difference(df_filtered.index)
+        removed_lower = df[~mask_lower].index
         n_lower = len(removed_lower)
         rows_lower = 1 if n_lower < 9 else min(4, math.ceil(n_lower / 9))
         cols_lower = min(9, n_lower) if rows_lower == 1 else 9
@@ -48,7 +48,7 @@ def filter_organoids_by(ad, df, feature, values, channel, pyramid_level=1):
 
     # Visualize removed due to upper boundary
     if n_removed_upper > 0:
-        removed_upper = df_filtered.index.difference(df.index[mask_lower])
+        removed_upper = df[~mask_upper].index
         n_upper = len(removed_upper)
         rows_upper = 1 if n_upper < 9 else min(4, math.ceil(n_upper / 9))
         cols_upper = min(9, n_upper) if rows_upper == 1 else 9
@@ -74,6 +74,7 @@ def get_deleted_organoids(ad, df_removed, df_filtered, rows, cols, title, featur
     - channel (int): Channel index for image visualization.
     - pyramid_level (int): Pyramid level for visualization.
     """
+    
     if df_removed.empty:
         return None
 

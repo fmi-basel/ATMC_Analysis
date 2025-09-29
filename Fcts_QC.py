@@ -1,13 +1,9 @@
-import matplotlib.pyplot as plt
-import numpy as np
-import pandas as pd
-import seaborn as sns
-import statsmodels.api as sm
-from sklearn import preprocessing
-import scipy.sparse
 from sklearn.preprocessing import RobustScaler, StandardScaler, MinMaxScaler
-
-from Fcts_Base import save_fig
+import matplotlib.pyplot as plt
+import seaborn as sns
+import scipy.sparse
+import pandas as pd
+import numpy as np
 
 """
 ***

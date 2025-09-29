@@ -1,10 +1,9 @@
-import random
-from ez_zarr import ome_zarr
 from Fcts_Base import load_img_mask_by_UID, save_fig
-import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
+import matplotlib.pyplot as plt
+import pandas as pd
+import numpy as np
+import random
 
 def segmentation_fidelity_check(ome_zarrs_dict, channels, channel_colors, channel_ranges, n, label_name, scalebar_micrometer = 100, pyramid_lvl_plot=4):
     """

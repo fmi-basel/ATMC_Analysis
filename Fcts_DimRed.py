@@ -1,16 +1,20 @@
+from __future__ import annotations
+
+from mpl_toolkits.axes_grid1 import make_axes_locatable
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.cluster import KMeans
+from typing import Optional, Union
+from pyslingshot import Slingshot
 import matplotlib.pyplot as plt
+from itertools import product
 import seaborn as sns
-import numpy as np
 import pandas as pd
 import scanpy as sc
-from itertools import product
-from sklearn.decomposition import PCA
-from sklearn.cluster import KMeans
-from mpl_toolkits.axes_grid1 import make_axes_locatable
-import anndata
+import numpy as np
 import phenograph
-from pyslingshot import Slingshot
-from Fcts_Base import save_fig, load_img_mask_by_UID, remove_uns, add_zarr_uns
+import anndata
+
+from Fcts_Base import save_fig, load_img_mask_by_UID, remove_uns
 
 """
 ***
@@ -27,11 +31,10 @@ def select_dimred_features(ad, remove_features):
 
 
 def compute_PCA(ad, plot_feat, number_components = 20, dimred_feats = None, representation = None, palette = "magma", save_plot = False):
-
     """
     Compute PCA on selected features of an AnnData object and visualize principal component scatter plots colored by specified features.
 
-    Parameters:
+      Parameters:
         ad (anndata.AnnData): The AnnData object containing expression data and annotations.
         plot_feat (list of str): Features to use for coloring the scatter plots.
         number_components (int, optional): Number of PCA components to compute. Default is 20.
@@ -43,7 +46,6 @@ def compute_PCA(ad, plot_feat, number_components = 20, dimred_feats = None, repr
         palette (str, optional): Colormap to use for continuous features in scatter plots. Default is `"magma"`.
         save_plot (bool, optional): Whether to save the generated plots to the directory specified in `ad.uns['plot_dir']`. Default is `False`.
     """
-
     if isinstance(plot_feat, str):
         plot_feat = [plot_feat]
 
@@ -51,44 +53,81 @@ def compute_PCA(ad, plot_feat, number_components = 20, dimred_feats = None, repr
     if representation is not None:
         if representation in ad.layers:
             data_all = ad.layers[representation]
+            layer_for_pca = representation
+            obsm_for_pca = None
         elif representation in ad.obsm:
             data_all = ad.obsm[representation]
+            layer_for_pca = None
+            obsm_for_pca = representation
         else:
             raise ValueError(f"Layer '{representation}' not found in ad.layers or ad.obsm.")
     else:
         data_all = ad.X
+        layer_for_pca = None
+        obsm_for_pca = None
 
-    # Subset features used for PCA input if specified
+    # Subset features used for PCA input if specified (only possible if using var_names-aligned matrix)
     if dimred_feats is not None:
         missing_feats = [f for f in dimred_feats if f not in ad.var_names]
         if missing_feats:
             raise ValueError(f"Some features in dimred_feats not found: {missing_feats}")
         feat_indices = [ad.var_names.get_loc(f) for f in dimred_feats]
         data = data_all[:, feat_indices]
+        # Make a temporary view with the selected features to let sc.pp.pca handle bookkeeping
+        ad_pca = ad[:, dimred_feats].copy()
     else:
         data = data_all
+        ad_pca = ad  # run PCA on the whole object
 
-    if np.isnan(data).any():
+    # Guard against NaNs in the matrix Scanpy will read
+    if hasattr(data, "toarray"):
+        # sparse or array-like
+        arr_chk = data.toarray() if hasattr(data, "toarray") else np.asarray(data)
+    else:
+        arr_chk = np.asarray(data)
+    if np.isnan(arr_chk).any():
         raise ValueError("Input data contains NaNs. Please preprocess or filter before PCA.")
 
-    # Perform PCA
-    pca = PCA(n_components=number_components, random_state=0)
-    pcs = pca.fit_transform(data)
-    ad.obsm["X_pca"] = pcs
+    # Run Scanpy PCA. Prefer passing layer if representation selects a layer; otherwise PCA uses X or an obsm is unsupported by pp.pca.
+    # Note: scanpy.pp.pca does not accept arbitrary obsm input; if representation refers to obsm, rely on ad.obsm being precomputed finite.
+    sc.pp.pca(
+        ad_pca,
+        n_comps=number_components,
+        layer=layer_for_pca,          # only used when representation is a layer or None
+        random_state=0,
+        copy=False,
+    )
 
-    total_var = np.sum(pca.explained_variance_ratio_) * 100
+    # If PCA ran on a sliced copy, copy results back to the original AnnData
+    # Embed PCs for all cells; when dimred_feats was used, PCs are based on those genes
+    ad.obsm["X_pca"] = ad_pca.obsm["X_pca"]
+    # Store Scanpy-standard metadata for explained variance
+    ad.uns["pca"] = ad_pca.uns.get("pca", {})
+    # Store loadings aligned to ad.var_names; if subset was used, place into full varm with NaN for non-selected genes
+    if dimred_feats is None:
+        ad.varm["PCs"] = ad_pca.varm["PCs"]
+    else:
+        # Initialize full matrix with NaNs then fill selected rows
+        comps = ad_pca.varm["PCs"].shape[1]
+        PCs_full = np.full((ad.n_vars, comps), np.nan, dtype=np.float32)
+        sel_idx = [ad.var_names.get_loc(f) for f in dimred_feats]
+        PCs_full[sel_idx, :] = ad_pca.varm["PCs"]
+        ad.varm["PCs"] = PCs_full
+
+    # Pull arrays for plotting
+    pcs = ad.obsm["X_pca"]
+    var_ratio = np.asarray(ad.uns["pca"].get("variance_ratio", []))
+    total_var = float(np.nansum(var_ratio) * 100.0) if var_ratio.size else 0.0
+
     n_pc_pairs = number_components // 2
     n_feats = len(plot_feat)
 
-    # Setup figure and axes grid: rows = PC pairs, cols = features
     fig, ax = plt.subplots(
         nrows=n_pc_pairs, ncols=n_feats,
         figsize=(4 * n_feats, 3.5 * n_pc_pairs),
         gridspec_kw={"hspace": 0.4, "wspace": 0.5},
         squeeze=False
     )
-
-    #fig.suptitle(f"Total Variance Explained: {total_var:.2f}%", fontsize=16)
     fig.subplots_adjust(top=0.90)
 
     for col, feat in enumerate(plot_feat):
@@ -96,8 +135,7 @@ def compute_PCA(ad, plot_feat, number_components = 20, dimred_feats = None, repr
         for row in range(n_pc_pairs):
             axis = ax[row, col]
 
-            # Plotting: categorical (obs) or continuous (var_names)
-            if feat in ad.obs.columns:  # categorical
+            if feat in ad.obs.columns:
                 hue_data = ad.obs[feat]
                 n_cat = hue_data.nunique() if hasattr(hue_data, "nunique") else None
                 palette_used = "tab10" if n_cat is not None and n_cat <= 10 else "Set2"
@@ -112,21 +150,17 @@ def compute_PCA(ad, plot_feat, number_components = 20, dimred_feats = None, repr
                     legend='brief' if (row == 0) else False,
                     edgecolor='none'
                 )
-            elif feat in ad.var_names:  # continuous
+            elif feat in ad.var_names:
                 gene_exp = ad[:, feat].X
-                if hasattr(gene_exp, "toarray"):
-                    gene_exp = gene_exp.toarray().flatten()
-                else:
-                    gene_exp = np.array(gene_exp).flatten()
+                gene_exp = gene_exp.toarray().flatten() if hasattr(gene_exp, "toarray") else np.array(gene_exp).flatten()
                 scatter = axis.scatter(
                     pcs[:, iterator - 1], pcs[:, iterator],
                     c=gene_exp, cmap=palette, s=20, alpha=0.7, edgecolor='none'
                 )
-                if row == 0:  # colorbar once per column
+                if row == 0:
                     divider = make_axes_locatable(axis)
                     cax = divider.append_axes("right", size="5%", pad=0.05)
                     cbar = fig.colorbar(scatter, cax=cax, orientation="vertical")
-                    # cbar.set_label(feat, fontsize=10)
                     cbar.ax.tick_params(labelsize=8)
             else:
                 axis.text(0.5, 0.5, f"Feature '{feat}' not found", ha="center", va="center", fontsize=10)
@@ -134,56 +168,53 @@ def compute_PCA(ad, plot_feat, number_components = 20, dimred_feats = None, repr
                 iterator += 2
                 continue
 
-            # Axis labeling & grid
-            x_var = pca.explained_variance_ratio_[iterator - 1] * 100
-            y_var = pca.explained_variance_ratio_[iterator] * 100
+            # Axis labeling with scanpy's explained variance
+            if var_ratio.size >= iterator + 0:
+                x_var = float(var_ratio[iterator - 1] * 100.0)
+            else:
+                x_var = np.nan
+            if var_ratio.size >= iterator + 1:
+                y_var = float(var_ratio[iterator] * 100.0)
+            else:
+                y_var = np.nan
+
             axis.set_xlabel(f"PC{iterator}\nExplained var: {x_var:.2f}%", fontsize=9)
             axis.set_ylabel(f"PC{iterator+1}\nExplained var: {y_var:.2f}%", fontsize=9)
             axis.tick_params(left=True, bottom=True, labelsize=8)
             axis.grid(True, linestyle='--', linewidth=0.5, alpha=0.6)
 
-            # Feature title only in the first row
             if row == 0:
-                axis.set_title(feat, fontsize = 12, y = 1.03)
+                axis.set_title(feat, fontsize=12, y=1.03)
             else:
                 axis.set_title("")
 
-            # Remove tick labels to reduce clutter
             axis.set_xticklabels([])
             axis.set_yticklabels([])
 
             iterator += 2
 
-    # Hide any unused axes if number of PC pairs * features grid is bigger than needed
     for col in range(n_feats):
         for row in range(n_pc_pairs):
-            # If the PCs to plot exceed available components, hide the axis
             if (row + 1) * 2 > number_components:
                 ax[row, col].set_visible(False)
-
-    #plt.tight_layout(rect=[0, 0, 1, 0.90])
 
     if save_plot:
         save_fig(fig, ad.uns["plot_dir"], "PCA", dpi=300)
 
-
-    # PCA Loadings heatmap
+    # PCA loadings heatmap from scanpy varm['PCs']
     comps = [f"PC{i + 1}" for i in range(number_components)]
-    feature_index = ad.var_names if dimred_feats is None else dimred_feats
-    pca_loadings = pd.DataFrame(pca.components_.T, index=feature_index, columns=comps)
-
-    fig, ax = plt.subplots(1, 1, figsize=(6, 15))
-    sns.heatmap(pca_loadings, ax=ax, cmap="RdBu_r", center=0, robust=True, cbar=True,
-                cbar_kws={'shrink': 0.5})
-
-    ax.set_title("PCA Loadings", fontsize=16, y=1.02)
-    ax.xaxis.set_ticks_position("bottom")
-    ax.tick_params(axis='x', labelrotation=45, labelsize=10)
-
-    if save_plot:
-        save_fig(fig, ad.uns["plot_dir"], "PCA_Heatmap", dpi=300)
+    if "PCs" in ad.varm and ad.varm["PCs"] is not None:
+        pca_loadings = pd.DataFrame(ad.varm["PCs"][:, :number_components], index=ad.var_names, columns=comps)
+        fig, ax = plt.subplots(1, 1, figsize=(6, 15))
+        sns.heatmap(pca_loadings, ax=ax, cmap="RdBu_r", center=0, robust=True, cbar=True, cbar_kws={'shrink': 0.5})
+        ax.set_title("PCA Loadings", fontsize=16, y=1.02)
+        ax.xaxis.set_ticks_position("bottom")
+        ax.tick_params(axis='x', labelrotation=45, labelsize=10)
+        if save_plot:
+            save_fig(fig, ad.uns["plot_dir"], "PCA_Heatmap", dpi=300)
 
     return ad
+
 
 def compute_DC(ad, plot_feat, number_components=20, n_neighbors=15, dimred_feats=None, representation=None, palette="magma", save_plot=False):
     """
@@ -443,7 +474,8 @@ def compute_UMAP(ad, plot_feat, n_neighbors, min_dist, dimred_feats, save_plot=F
         save_fig(fig, ad.uns["plot_dir"], file_name, dpi=300)
 
     ad.obsm["X_umap"] = coords
-    ad = add_zarr_uns(ad)
+    ad.uns["umap"] = ad_sub.uns["umap"]
+
     return ad
 
 def compute_tSNE(
@@ -626,7 +658,7 @@ def compute_tSNE(
 
     # Save final embedding from last combo
     ad.obsm["X_tsne"] = coords
-    ad = add_zarr_uns(ad)
+
     return ad
 
 
@@ -723,9 +755,12 @@ def compute_kmeans(
                 break
 
     if coords is None:
-        # Compute a quick 2D PCA on M for plotting only
-        pca = PCA(n_components=2, random_state=random_state)
-        coords = pca.fit_transform(M)
+        if not np.isfinite(M).all():
+            raise ValueError("PCA input contains non-finite values.")
+        # Run Scanpy PCA on a temporary AnnData to avoid mutating existing objects
+        _tmp = anndata.AnnData(X=M)
+        sc.pp.pca(_tmp, n_comps=2, random_state=random_state, copy=False)
+        coords = _tmp.obsm["X_pca"][:, :2]
         coords_name = "PCA(2) on clustering matrix"
 
     # Plot layout:
@@ -775,7 +810,7 @@ def compute_kmeans(
 
     # Save last labels to a canonical key
     ad.obs["kmeans_labels"] = pd.Categorical(last_labels.astype(str))
-    ad = add_zarr_uns(ad)
+
     return ad
 
 
@@ -869,8 +904,12 @@ def compute_phenograph(
                 break
 
     if coords is None:
-        pca = PCA(n_components=2, random_state=random_state) # Compute a quick 2D PCA on M for plotting only. PCA in ad obsm["X_pca"] is not changed
-        coords = pca.fit_transform(M)
+        if not np.isfinite(M).all():
+            raise ValueError("PCA input contains non-finite values.")
+        # Run Scanpy PCA on a temporary AnnData to avoid mutating existing objects
+        _tmp = AnnData(X=M)
+        sc.pp.pca(_tmp, n_comps=2, random_state=random_state, copy=False)
+        coords = _tmp.obsm["X_pca"][:, :2]
         coords_name = "PCA(2) on clustering matrix"
 
     # Plot layout
@@ -927,11 +966,8 @@ def compute_phenograph(
 
     # Save last labels to a canonical key
     ad.obs["phenograph_labels"] = pd.Categorical(last_labels.astype(str))
-    ad = add_zarr_uns(ad)
+
     return ad
-
-
-
 
 
 
@@ -1172,4 +1208,219 @@ def run_slingshot(
         "categories": categories,
     }
     return ad
+
+
+def subsample_anndata_geosketch(ad, fraction=0.1, use_rep='X_pca', random_state=0):
+    """
+    Subsample an AnnData object using geosketch.
+    
+    Parameters:
+    -----------
+    ad : AnnData
+        The input AnnData object.
+    fraction : float, optional (default: 0.1)
+        The fraction of cells to keep (0 < fraction <= 1).
+    use_rep : str, optional (default: 'X_pca')
+        The representation to use for geosketch. 'X_pca' is recommended.
+    random_state : int, optional (default: 0)
+        Random seed for reproducibility.
+    
+    Returns:
+    --------
+    AnnData
+        A new AnnData object with subsampled cells.
+    """
+    
+    import geosketch
+    
+    # Get the representation to use for geosketch
+    X = ad.obsm[use_rep]
+    
+    # Calculate the number of cells to keep
+    n_sketch = int(ad.n_obs * fraction)
+    
+    # Perform geosketch
+    sketch_index = geosketch.gs(X, n_sketch, replace = False, seed = random_state)
+    
+    # Create subsampled AnnData object
+    ad_subsampled = ad[sketch_index].copy()
+    
+    return ad_subsampled
+
+
+def random_subset_anndata(adata, n, random_state):
+    """
+    Return a new, independent AnnData with n randomly chosen observations from `adata`.
+
+    Parameters
+    ----------
+    adata : AnnData
+        Input AnnData object (cells in rows, genes in columns).
+    n : int
+        Number of observations (cells) to sample. Must be <= adata.n_obs.
+    random_state : int | None
+        Seed for reproducibility.
+    """
+
+    import numpy as np
+
+    if n < 0 or n > adata.n_obs:
+        raise ValueError(f"n must be between 0 and {adata.n_obs}, got {n}")
+
+    rng = np.random.default_rng(random_state)
+    idx = rng.choice(adata.n_obs, size=  n, replace = False)
+    # Sort indices to keep original order (optional)
+    idx.sort()
+
+    # Slicing creates a view; .copy() materializes an independent object
+    adata_sub = adata[idx, :].copy()
+
+    return adata_sub
+
+def random_subset_anndata_frac(adata, fraction, random_state):
+    """
+    Return a new, independent AnnData with a fraction of randomly chosen observations from `adata`.
+
+    Parameters
+    ----------
+    adata : AnnData
+        Input AnnData object (cells in rows, genes in columns).
+    fraction : float
+        Fraction of observations to sample. Must satisfy 0 < fraction <= 1.0.
+        The number of sampled cells is round(fraction * adata.n_obs) with a minimum of 1 unless fraction == 0.
+    random_state : int | None
+        Seed for reproducibility.
+
+    Returns
+    -------
+    AnnData
+        A new AnnData containing the sampled observations, independent from the original.
+    """
+
+    if fraction <= 0 or fraction > 1:
+        raise ValueError(f"fraction must be in (0, 1], got {fraction}")
+
+    if adata.n_obs == 0:
+        raise ValueError("Cannot sample from an AnnData with zero observations")
+
+   
+    # Use round to be symmetric around .5; ensure at least 1 when fraction>0
+    n = max(1, int(round(fraction * adata.n_obs)))
+
+
+    rng = np.random.default_rng(random_state)
+    idx = rng.choice(adata.n_obs, size = n, replace = False)
+    idx.sort()  # keep original ordering
+
+    adata_sub = adata[idx, :].copy()
+    return adata_sub
+
+def knn_label_transfer(
+    adata_ref: anndata.ad,
+    adata_target: anndata.ad,
+    label_key: str,
+    n_neighbors: int = 15,
+    layer: Optional[str] = None,
+    obsm_key: Optional[str] = None,
+    features: Optional[Union[list[str], np.ndarray, pd.Index]] = None,
+    target_obs_key: Optional[str] = None,
+    copy: bool = False,
+) -> Optional[anndata.ad]:
+    
+    """
+    Transfer discrete labels from a reference AnnData to a target AnnData using k-nearest neighbors.
+
+    Parameters
+    ----------
+    adata_ref
+        Reference AnnData containing training features and labels in .obs[label_key].
+    adata_target
+        Target AnnData to receive predicted labels.
+    label_key
+        Column in adata_ref.obs with categorical labels to train on (e.g., "leiden_1.2").
+    n_neighbors
+        Number of neighbors for KNN voting. Default 15.
+    layer
+        Name of a numeric layer to use instead of .X. If provided, used for both reference and target.
+        Mutually exclusive with obsm_key.
+    obsm_key
+        Name of a matrix in .obsm to use as features (e.g., "X_pca"). If provided, used for both
+        reference and target. Mutually exclusive with layer.
+    features
+        Optional list/array of gene names to subset columns of X or a layer to a shared set of features.
+        Only used when layer is None and obsm_key is None (i.e., using .X/.layers as gene-feature matrices).
+        Must be present in both adata_ref.var_names and adata_target.var_names.
+    target_obs_key
+        Name of the .obs column in adata_target to store predictions. If None, uses label_key.
+    copy
+        If True, returns a copy of adata_target with predictions. If False, modifies adata_target in place
+        and returns None.
+    """
+    if (layer is not None) and (obsm_key is not None):
+        raise ValueError("Provide at most one of 'layer' or 'obsm_key', not both.")
+
+    if label_key not in adata_ref.obs.columns:
+        raise ValueError(f"Label column '{label_key}' not found in adata_ref.obs.")
+
+    target_obs_key = target_obs_key or label_key
+
+    # Extract training labels
+    y_train = adata_ref.obs[label_key].to_numpy()
+
+    # Helper to get a 2D numpy array from AnnData according to the chosen representation
+    def _get_matrix(a: AnnData) -> np.ndarray:
+        if obsm_key is not None:
+            if obsm_key not in a.obsm:
+                raise ValueError(f"obsm_key '{obsm_key}' not found in a.obsm.")
+            M = a.obsm[obsm_key]
+            M = M.A if hasattr(M, "A") else (M.toarray() if hasattr(M, "toarray") else np.asarray(M))
+            return M
+
+        if layer is not None:
+            if layer not in a.layers:
+                raise ValueError(f"layer '{layer}' not found in a.layers.")
+            M = a.layers[layer]
+        else:
+            M = a.X
+
+        # Subset features if requested
+        if features is not None:
+            feats = pd.Index(features)
+            missing = feats.difference(a.var_names)
+            if len(missing) > 0:
+                raise ValueError(f"Some requested features are missing: {list(missing)}")
+            idx = a.var_names.get_indexer(feats)
+            # If M is sparse, slice then densify
+            M = M[:, idx]
+        # Densify if needed
+        M = M.A if hasattr(M, "A") else (M.toarray() if hasattr(M, "toarray") else np.asarray(M))
+        return M
+
+    # Build matrices
+    X_train = _get_matrix(adata_ref)
+    X_full = _get_matrix(adata_target)
+
+    # Basic validation: shapes and finiteness
+    if X_train.ndim != 2 or X_full.ndim != 2:
+        raise ValueError("Feature matrices must be 2D.")
+    if X_train.shape[1] != X_full.shape[1]:
+        raise ValueError(f"Feature dimension mismatch: ref={X_train.shape[1]}, target={X_full.shape[1]}.")
+
+    if not np.isfinite(X_train).all():
+        raise ValueError("Training matrix contains non-finite values (NaN/Inf). Clean or filter before training.")
+    if not np.isfinite(X_full).all():
+        raise ValueError("Target matrix contains non-finite values (NaN/Inf). Clean or filter before prediction.")
+
+    # Train and predict
+    knn = KNeighborsClassifier(n_neighbors=n_neighbors).fit(X_train, y_train)
+    y_pred = knn.predict(X_full)
+
+    # Write results
+    if copy:
+        ad_out = adata_target.copy()
+        ad_out.obs[target_obs_key] = pd.Categorical(y_pred) if pd.api.types.is_categorical_dtype(adata_ref.obs[label_key]) else y_pred
+        return ad_out
+    else:
+        adata_target.obs[target_obs_key] = pd.Categorical(y_pred) if pd.api.types.is_categorical_dtype(adata_ref.obs[label_key]) else y_pred
+        return None
 
