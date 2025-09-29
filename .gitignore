@@ -6,3 +6,16 @@ PlateLayout_Templates/._Layout_384.xlsx
 PlateLayout_Templates/._PlateSetup_BARCODE_TEMPLATE96.xlsx
 .gitignore
 ._PlateLayout_Templates
+._1_FeatureExtraction.ipynb
+._2_Filtering.ipynb
+._Fct_Base.py
+._Fcts_DimRed.py
+._Fcts_FE.py
+._Fcts_Filtering.py
+._Fcts_Plotting.py
+._Fcts_QC.py
+._Functions.py
+__pycache__/Fct_Base.cpython-312.pyc
+__pycache__/Fcts_Base.cpython-312.pyc
+__pycache__/Fcts_FE.cpython-312.pyc
+__pycache__/Fcts_Plotting.cpython-312.pyc
