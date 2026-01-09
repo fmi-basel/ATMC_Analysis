@@ -6,6 +6,7 @@ import pandas as pd
 import anndata
 
 from skimage import filters
+from ez_zarr import ome_zarr
 
 from Fcts_Base import (
     find_staining_in_ABs,
@@ -32,6 +33,11 @@ FEATURE EXTRACTION (MULTICYCLE)
 Implements multi-round feature extraction for datasets where the OME-Zarr structure is:
   <plate>.zarr/<row>/<col>/<round>/...
 
+Important note for ez_zarr:
+- ez_zarr.import_plate(..., image_name="0") selects the image group within each well (often "0").
+- For multiplexing cycles stored as "0", "1", ... image groups, each round must be imported
+  separately with image_name=str(round) to access that data.
+
 Assumptions:
 - ROI table exists in segmentation_round (default 0)
 - labels exist in segmentation_round (default 0)
@@ -39,8 +45,8 @@ Assumptions:
 - segmentation is identical across rounds
 
 Strategy:
-- morphology features: computed once from round 0 labels
-- intensity features: computed per round (including round 0) and prefixed with R{round}__
+- morphology features: computed once from segmentation_round labels
+- intensity features: computed per round and prefixed with R{round}__
 - Pearson correlations: computed across all (round, stain) vectors (within + between rounds)
 """
 
@@ -67,7 +73,7 @@ def _parse_well_round_from_path(path: str) -> tuple[str, int] | tuple[None, None
 
 
 def build_well_round_map(plate) -> dict[tuple[str, int], object]:
-    """Map (well, round) -> ez_zarr Image object."""
+    """Map (well, round) -> ez_zarr Image object (for the images contained in this plate object)."""
     m = {}
     for img in plate.images:
         well, rnd = _parse_well_round_from_path(img.get_path())
@@ -75,6 +81,64 @@ def build_well_round_map(plate) -> dict[tuple[str, int], object]:
             continue
         m[(well, rnd)] = img
     return m
+
+
+# --- Round-aware plate loading (ez_zarr image_name) ---
+_PLATE_CACHE: dict[tuple[str, int], object] = {}
+
+
+def _infer_plate_root_from_image_path(img_path: str) -> str:
+    """Infer the plate root (.zarr) path from an image path ending with /<row>/<col>/<image_name>."""
+    parts = _as_path_str(img_path).replace("\\", "/").rstrip("/").split("/")
+    if len(parts) < 4:
+        return _as_path_str(img_path)
+    # remove last 3: row/col/image_name
+    return "/".join(parts[:-3])
+
+
+def _default_round_from_plate(plate) -> int:
+    """Attempt to infer which image_name was used to import this plate (usually 0)."""
+    try:
+        if hasattr(plate, "images") and len(plate.images) > 0:
+            _, rnd = _parse_well_round_from_path(plate.images[0].get_path())
+            if rnd is not None:
+                return int(rnd)
+    except Exception:
+        pass
+    return 0
+
+
+def _plate_root_from_plate(plate) -> str:
+    """Infer plate root path from the first available image path."""
+    if hasattr(plate, "images") and len(plate.images) > 0:
+        return _infer_plate_root_from_image_path(plate.images[0].get_path())
+    # Fallback: try plate.paths if available
+    if hasattr(plate, "paths") and plate.paths:
+        return _infer_plate_root_from_image_path(plate.paths[0])
+    raise ValueError("Cannot infer plate root path from plate object")
+
+
+def get_plate_for_round(plate, round_id: int):
+    """Return a plate object for a given round (image_name), caching imports."""
+    round_id = int(round_id)
+    default_r = _default_round_from_plate(plate)
+    if round_id == default_r:
+        return plate
+
+    root = _plate_root_from_plate(plate)
+    key = (root, round_id)
+    if key not in _PLATE_CACHE:
+        _PLATE_CACHE[key] = ome_zarr.import_plate(root, image_name=str(round_id))
+    return _PLATE_CACHE[key]
+
+
+def build_well_round_map_multi(plate, rounds: set[int]) -> dict[tuple[str, int], object]:
+    """Build a (well, round)->image map across multiple rounds by importing each round plate."""
+    m_all: dict[tuple[str, int], object] = {}
+    for r in sorted({int(x) for x in rounds}):
+        pr = get_plate_for_round(plate, r)
+        m_all.update(build_well_round_map(pr))
+    return m_all
 
 
 def get_stains_for_round(stainings: dict, ab_key: str, round_id: int) -> list[str]:
@@ -215,10 +279,14 @@ def estimate_staining_thresholds_multicycle(
     round_id: int = 0,
     segmentation_round: int = 0,
 ):
-    """Estimate thresholds for a specific round using Round0 ROI table coordinates."""
+    """Estimate thresholds for a specific round using segmentation_round ROI table coordinates."""
 
     import random
     random.seed(seed)
+
+    round_id = int(round_id)
+    segmentation_round = int(segmentation_round)
+    rounds_needed = {round_id, segmentation_round}
 
     # Build stain list for this round per AB mix and map to channel index
     thresholds = {}
@@ -272,6 +340,9 @@ def estimate_staining_thresholds_multicycle(
                 lst = random.sample(dict_org[stain][cond], n) + lst
         dict_org_lst[stain] = lst
 
+    # Cache well-round maps per barcode (avoids repeated imports)
+    maps_by_barcode: dict[str, dict[tuple[str, int], object]] = {}
+
     # Compute thresholds
     for stain, uids in dict_org_lst.items():
         for UID in uids:
@@ -281,10 +352,12 @@ def estimate_staining_thresholds_multicycle(
             well = UID.split("-")[-2]
 
             plate = ome_zarr_dict[bc]
-            m = build_well_round_map(plate)
+            if bc not in maps_by_barcode:
+                maps_by_barcode[bc] = build_well_round_map_multi(plate, rounds=rounds_needed)
+            m = maps_by_barcode[bc]
 
-            img_seg = m.get((well, int(segmentation_round)))
-            img_r = m.get((well, int(round_id)))
+            img_seg = m.get((well, segmentation_round))
+            img_r = m.get((well, round_id))
             if img_seg is None or img_r is None:
                 thresholds[stain][1].append(np.nan)
                 continue
@@ -346,6 +419,10 @@ def plot_thresholds_multicycle(
 
     random.seed(seed)
 
+    round_id = int(round_id)
+    segmentation_round = int(segmentation_round)
+    rounds_needed = {round_id, segmentation_round}
+
     rows = len(dict_org[list(dict_org.items())[0][0]].keys()) + 1
     cols = len(dict_org.keys())
 
@@ -371,6 +448,9 @@ def plot_thresholds_multicycle(
             ax[0, i].set_axis_off()
             ax[0, i].text(x=0.5, y=0.5, s="No threshold found", transform=ax[0, i].transAxes, ha="center")
 
+    # Cache per-barcode maps
+    maps_by_barcode: dict[str, dict[tuple[str, int], object]] = {}
+
     # Show one random ROI per timepoint
     for col, stain in enumerate(thresholds.keys()):
         for row in range(1, len(timepoints_lst) + 1):
@@ -387,9 +467,12 @@ def plot_thresholds_multicycle(
             well = UID.split("-")[-2]
 
             plate = ome_zarr_dict[bc]
-            m = build_well_round_map(plate)
-            img_seg = m.get((well, int(segmentation_round)))
-            img_r = m.get((well, int(round_id)))
+            if bc not in maps_by_barcode:
+                maps_by_barcode[bc] = build_well_round_map_multi(plate, rounds=rounds_needed)
+            m = maps_by_barcode[bc]
+
+            img_seg = m.get((well, segmentation_round))
+            img_r = m.get((well, round_id))
 
             if img_seg is None or img_r is None:
                 ax[row, col].imshow(np.zeros((200, 200)), aspect="auto", cmap="binary")
@@ -408,7 +491,7 @@ def plot_thresholds_multicycle(
                     pyramid_level=pyramid_level,
                     upper_left_yx=(ul_y, ul_x),
                     lower_right_yx=(lr_y, lr_x),
-                    )
+                )
                 img = img[ch, 0]
             except Exception:
                 img = np.zeros((200, 200))
@@ -450,6 +533,9 @@ def extract_features_multicycle(
     if rounds_to_extract is None:
         rounds_to_extract = [0]
     rounds_to_extract = [int(r) for r in rounds_to_extract]
+    segmentation_round = int(segmentation_round)
+
+    rounds_needed = set(rounds_to_extract + [segmentation_round])
 
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%Hh%Mmin%Ss")
 
@@ -460,13 +546,13 @@ def extract_features_multicycle(
 
     for i, bc in enumerate(ome_zarrs_dict.keys()):
         plate = ome_zarrs_dict[bc]
-        m = build_well_round_map(plate)
+        m = build_well_round_map_multi(plate, rounds=rounds_needed)
 
         wells_in_exp = experiment_setup[bc]
         rows = []
 
         for well in wells_in_exp.keys():
-            img_seg = m.get((well, int(segmentation_round)))
+            img_seg = m.get((well, segmentation_round))
             if img_seg is None:
                 continue
 
@@ -525,7 +611,7 @@ def extract_features_multicycle(
                 }
 
                 # Add staining columns for each round
-                for r in sorted(set(rounds_to_extract + [int(segmentation_round)])):
+                for r in sorted(rounds_needed):
                     stains_r = get_stains_for_round(stainings, ab_key, r)
                     for ch_i, stain in enumerate(stains_r):
                         if r == 0:
