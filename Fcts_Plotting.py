@@ -38,7 +38,7 @@ def segmentation_fidelity_check(ome_zarrs_dict, channels, channel_colors, channe
                 fig_height_inch=15,
                 scalebar_micrometer = scalebar_micrometer,
                 show_scalebar_label=True,
-                title=f"{barcode} - {well}"
+                title=f"{barcode} - {well}",
             )
 
 

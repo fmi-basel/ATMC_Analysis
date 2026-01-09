@@ -9,6 +9,94 @@ FILTERING FUNCTIONS
 ***
 """
 
+import pandas as pd
+
+def filter_rows_by_percentile_bounds(
+    df: pd.DataFrame,
+    features,
+    lower_q: float = 0.01,
+    upper_q: float = 0.99,
+    keep_na: bool = True,
+    return_details: bool = False,
+    flag_prefix: str = "OutlierPct",
+):
+    """
+    Filter out rows where any of the specified features lies outside the
+    [lower_q, upper_q] percentile interval (computed per feature).
+
+    Tagging happens first for all features; filtering happens only after all tags exist.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Input dataframe.
+    features : str | list[str]
+        Feature name(s) to evaluate.
+    lower_q, upper_q : float
+        Quantile bounds in [0, 1]. Example: 0.01 and 0.99.
+    keep_na : bool
+        If True: NaNs do NOT trigger outlier removal (NaNs are kept).
+        If False: NaNs are treated as outliers (row gets flagged).
+    return_details : bool
+        If True: return (df_filtered, df_annotated, bounds_df).
+        If False: return df_filtered.
+    flag_prefix : str
+        Prefix for added flag columns in df_annotated.
+    """
+    if isinstance(features, str):
+        features = [features]
+    features = list(features)
+
+    if not (0 <= lower_q <= 1 and 0 <= upper_q <= 1 and lower_q < upper_q):
+        raise ValueError("Quantiles must satisfy 0 <= lower_q < upper_q <= 1.")
+
+    missing = [f for f in features if f not in df.columns]
+    if missing:
+        raise KeyError(f"Feature(s) not found in df: {missing}")
+
+    df_annot = df.copy()
+
+    # Build per-feature flags and record bounds
+    flags = pd.DataFrame(index=df_annot.index)
+    bounds_rows = []
+
+    for feat in features:
+        s = df_annot[feat]
+        lo = s.quantile(lower_q)
+        hi = s.quantile(upper_q)  # quantile API [web:250]
+
+        if keep_na:
+            flag = s.notna() & (s.lt(lo) | s.gt(hi))
+        else:
+            flag = s.isna() | s.lt(lo) | s.gt(hi)
+
+        flags[feat] = flag
+        df_annot[f"{flag_prefix}__{feat}"] = flag
+
+        bounds_rows.append(
+            {"feature": feat, "lower_q": lower_q, "upper_q": upper_q, "lower": lo, "upper": hi}
+        )
+
+    # Summary tagging (before filtering)
+    df_annot[f"{flag_prefix}__any"] = flags.any(axis=1)  # row-wise union [web:279]
+    df_annot[f"{flag_prefix}__features"] = flags.apply(
+        lambda r: ",".join(r.index[r.values]),
+        axis=1,
+    )
+
+    # Now filter (single pass)
+    df_filtered = df_annot.loc[~df_annot[f"{flag_prefix}__any"]].copy()
+
+    bounds_df = pd.DataFrame(bounds_rows).set_index("feature")
+
+    print(f"Removed {len(df) - len(df_filtered)} out of {len(df)} objects.")
+
+    if return_details:
+        return df_filtered, df_annot, bounds_df
+    return df_filtered
+
+
+
 def filter_organoids_by(ad, df, feature, values, channel, pyramid_level=1):
     """
     Filter organoids based on a specified numerical feature range and visualize the removed organoids.
@@ -152,7 +240,7 @@ def plot_random_organoids(ad, df_raw, df, feature, rows=10, cols=10, channel=0, 
     removed_size = list(sampled[feature])
 
     fig, ax = plt.subplots(rows, cols, figsize=(cols*2, rows*2))
-    fig.suptitle("Surviving Organoids", fontsize=18, y=1.00)
+    fig.suptitle("Remaining Objects", fontsize=18, y=1.00)
 
     # Flatten axes array for easy iteration regardless of shape
     if rows == 1 and cols == 1:

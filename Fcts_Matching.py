@@ -1,10 +1,11 @@
-import numpy as np
-import pandas as pd
-import anndata as ad
-
+from Fcts_Base import save_adata, save_df
 from scipy.spatial import cKDTree
 from scipy import sparse
-
+import anndata as ad
+import pandas as pd
+import numpy as np
+import datetime
+import os
 
 """***
 MATCHING FUNCTIONS
@@ -82,9 +83,9 @@ def match_1to1_by_centroid(
     matches: list[tuple[str, str, float]] = []
     unmatched: list[str] = []
 
-    ad2_groups = dict(tuple(ad2.obs.groupby([barcode_col, well_col], sort=False)))
+    ad2_groups = dict(tuple(ad2.obs.groupby([barcode_col, well_col], sort=False, observed=False)))
 
-    for (bc, well), g1 in ad1.obs.groupby([barcode_col, well_col], sort=False):
+    for (bc, well), g1 in ad1.obs.groupby([barcode_col, well_col], sort=False, observed=False):
         if (bc, well) not in ad2_groups:
             unmatched.extend(g1.index.tolist())
             continue
@@ -213,10 +214,6 @@ def save_matching_outputs(
     - This function sets that key to out_dir.
     - Unmatched AD1 IDs are written as a CSV next to the merged h5ad.
     """
-
-    import os
-    import datetime
-    from Fcts_Base import save_adata, save_df
 
     os.makedirs(out_dir, exist_ok=True)
 

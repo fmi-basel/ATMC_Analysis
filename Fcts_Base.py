@@ -582,7 +582,7 @@ def get_stainings(source, sheet="StainingLayout"):
     # Print summary
     print(f"Found {len(out)} staining mixes in experiment setup:")
     for mix, rounds in out.items():
-        rounds_str = ", ".join([f"R{r}({len(v)})" for r, v in sorted(rounds.items())])
+        rounds_str = ", ".join([f"R{r}({v})" for r, v in sorted(rounds.items())])
         print(f"  {mix}: {rounds_str}")
 
     get_pipetting_info(source)
