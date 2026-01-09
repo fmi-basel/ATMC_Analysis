@@ -196,3 +196,43 @@ def merge_anndata_by_matches(
         ad_merged.uns["matching"] = matching_uns
 
     return ad_merged
+
+
+def save_matching_outputs(
+    ad_merged: ad.AnnData,
+    unmatched_ad1: list[str],
+    out_dir: str,
+    out_basename: str = "1b_Matched_1to1",
+    error_on_unmatched: bool = True,
+) -> None:
+    """Save merged AnnData using the project's save_adata() helper, plus an unmatched report.
+
+    Notes
+    -----
+    - save_adata() writes into ad_merged.uns['table_dir'].
+    - This function sets that key to out_dir.
+    - Unmatched AD1 IDs are written as a CSV next to the merged h5ad.
+    """
+
+    import os
+    import datetime
+    from Fcts_Base import save_adata, save_df
+
+    os.makedirs(out_dir, exist_ok=True)
+
+    # Ensure save_adata knows where to write
+    ad_merged.uns["table_dir"] = out_dir
+
+    # Save AnnData
+    save_adata(ad_merged, out_basename)
+
+    # Save unmatched report
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%Hh%Mmin%Ss")
+    df_unmatched = pd.DataFrame({"ad1_id": unmatched_ad1})
+    save_df(out_dir, f"{out_basename}_unmatched_ad1_{timestamp}", df_unmatched)
+
+    if error_on_unmatched and len(unmatched_ad1) > 0:
+        raise ValueError(
+            f"{len(unmatched_ad1)} AD1 objects had no AD2 match within the selected max distance. "
+            "Merged output was written, but matching is incomplete (see unmatched CSV)."
+        )
