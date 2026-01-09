@@ -95,4 +95,4 @@ Typical outputs:
 
 ## License / citation
 
-Add lab/license/citation information here.
+The ATMC_Analysis workflow was created for the Applied Tissue Models Center (ATMC) at the Friedrich Miescher Institute for Biomedical Research (FMI) and is under MIT License. All copyright belongs to the FMI.
