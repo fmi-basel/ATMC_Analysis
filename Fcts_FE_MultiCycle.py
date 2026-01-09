@@ -127,6 +127,8 @@ def intensity_features_for_round(
     thresholds_round: dict[str, float],
     quantiles_to_calc,
     round_id: int,
+    spacing: float,
+    OID: str,
     sigma: float = 3,
 ):
     """Compute intensity features for a single round.
@@ -168,14 +170,13 @@ def intensity_features_for_round(
             "C01_Mask": mask_channel.astype(bool),
         }
 
-        # Compute features
-        row_data_round = channel_mask_feat_calc(mask, images["C01_Mask"], staining_key, row_data_round, OID=None, spacing=1)
-        row_data_round = intensity_feat_calc(img, mask, images["C01_Mask"], row_data_round, staining_key, OID=None, quantiles_to_calc=quantiles_to_calc)
-        row_data_round = moments_channel_mask(mask, img, row_data_round, OID=None, staining=staining_key, spacing=1)
+        # Compute features (use real pixel spacing)
+        row_data_round = channel_mask_feat_calc(mask, images["C01_Mask"], staining_key, row_data_round, OID=OID, spacing=spacing)
+        row_data_round = intensity_feat_calc(img, mask, images["C01_Mask"], row_data_round, staining_key, OID=OID, quantiles_to_calc=quantiles_to_calc)
+        row_data_round = moments_channel_mask(mask, img, row_data_round, OID=OID, staining=staining_key, spacing=spacing)
 
         # Pearson vectors (raw intensities within mask)
-        vec = img[mask_bool]
-        vectors[staining_key] = vec
+        vectors[staining_key] = img[mask_bool]
 
     return row_data_round, vectors
 
@@ -407,7 +408,7 @@ def plot_thresholds_multicycle(
                     pyramid_level=pyramid_level,
                     upper_left_yx=(ul_y, ul_x),
                     lower_right_yx=(lr_y, lr_x),
-                )
+                    )
                 img = img[ch, 0]
             except Exception:
                 img = np.zeros((200, 200))
@@ -485,9 +486,9 @@ def extract_features_multicycle(
                 lr_y = row.y_micrometer + row.len_y_micrometer
                 lr_x = row.x_micrometer + row.len_x_micrometer
 
-                # Load round0 pair for mask
+                # Load segmentation round pair for mask
                 try:
-                    img0, mask0 = img_seg.get_array_pair_by_coordinate(
+                    _, mask0 = img_seg.get_array_pair_by_coordinate(
                         label_name=label_name,
                         pyramid_level=pyramid_level,
                         upper_left_yx=(ul_y, ul_x),
@@ -531,7 +532,7 @@ def extract_features_multicycle(
                             row_data[f"Staining_Ch{ch_i+1}"] = stain
                         row_data[f"Staining_R{r}_Ch{ch_i+1}"] = stain
 
-                # Morphology once
+                # Morphology once (segmentation round)
                 row_data = morphology_features(
                     mask_for_oid,
                     row_data,
@@ -570,11 +571,11 @@ def extract_features_multicycle(
                         thresholds_round=thr_r,
                         quantiles_to_calc=quantiles_to_calc,
                         round_id=int(r),
+                        spacing=pixel_spacing,
+                        OID=OID,
                         sigma=sigma_intensity,
                     )
 
-                    # Fix spacing-dependent features: the helper used spacing=1 to avoid refactoring.
-                    # Convert selected geometry-dependent intensity features if needed later.
                     row_data.update(feats_r)
                     pearson_vectors.update(vecs_r)
 
