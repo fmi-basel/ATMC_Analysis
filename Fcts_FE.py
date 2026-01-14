@@ -352,10 +352,18 @@ def merge_feature_tables_from_zarr_rounds(
     file_ending: str = ".zarr",
     validate_obs_names: bool = True,
     save_merged: bool = True,
+    join: str = "inner",
 ):
     """Load one merged AnnData per round, then concatenate rounds along vars.
 
     This is the one-call wrapper intended for 1_FeatureLoading.ipynb.
+
+    Parameters
+    ----------
+    join
+        How to combine objects across rounds.
+        - 'inner' (default): keep only Organoid_IDs present in all rounds (recommended if some wells lack a round)
+        - 'outer': union of Organoid_IDs across rounds (missing features become NaN)
 
     Notes
     -----
@@ -395,15 +403,29 @@ def merge_feature_tables_from_zarr_rounds(
     if len(ad_list) == 1:
         ad_all = ad_list[0]
     else:
-        if validate_obs_names:
+        if join not in {"inner", "outer"}:
+            raise ValueError("join must be 'inner' or 'outer'")
+
+        if join == "inner":
+            common = ad_list[0].obs_names
+            for ad_r in ad_list[1:]:
+                common = common.intersection(ad_r.obs_names)
+            if len(common) == 0:
+                raise ValueError("No overlapping Organoid_IDs across requested rounds. Use join='outer' to keep union.")
+            ad_list = [ad_r[common, :].copy() for ad_r in ad_list]
+
+        # For join='outer' we rely on ad.concat(join='outer') to union obs_names.
+        if validate_obs_names and join == "inner":
+            # after subsetting to common, obs_names should match
             obs0 = ad_list[0].obs_names
             for j, ad_r in enumerate(ad_list[1:], start=1):
                 if not obs0.equals(ad_r.obs_names):
                     raise ValueError(f"obs_names mismatch between rounds {rounds[0]} and {rounds[j]}")
+
         ad_all = ad.concat(ad_list, axis=1, merge="same", join="outer")
 
-    # Carry round list in .uns for downstream
     ad_all.uns["multiplexing_rounds"] = [int(r) for r in rounds]
+    ad_all.uns["round_join"] = join
 
     if save_merged:
         rtag = "-".join([str(int(r)) for r in rounds])
