@@ -248,7 +248,7 @@ def load_img_mask_by_UID(UID, ome_zarr_dict, table_name, label_name, pyramid_lev
 
     return img, mask
 
-def find_zarr_dirs(root_dir, max_depth=None):
+def find_zarr_dirs(root_dir, file_ending = ".zarr",max_depth=None):
     """
     Finds all OME-Zarr directories within a given root directory,
     stopping at the first depth where any are found.
@@ -282,7 +282,7 @@ def find_zarr_dirs(root_dir, max_depth=None):
         # Find .zarr folders at this level
         this_level_zarrs = [
             os.path.join(current_dir, d)
-            for d in dirnames if d.endswith('.zarr')
+            for d in dirnames if d.endswith(file_ending)
         ]
 
         if this_level_zarrs:
