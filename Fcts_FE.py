@@ -350,18 +350,24 @@ def merge_feature_tables_from_zarr_rounds(
     roi_table_name: str = "nuclei_ROI_table",
     label_name: str = "nuclei",
     file_ending: str = ".zarr",
-    validate_obs_names: bool = True,
+    validate_obs_names: bool = False,
     save_merged: bool = True,
+    join: str = "outer",
 ):
     """Load one merged AnnData per round, then concatenate rounds along vars.
 
-    This is the one-call wrapper intended for 1_FeatureLoading.ipynb.
+    Default behavior matches 1_FeatureExtraction: keep all objects across rounds and fill missing
+    round-specific features with NaN.
 
-    Notes
-    -----
-    - Each round's features are already prefixed with R{round}__ by merge_feature_tables_from_zarr.
-    - Each round is saved as <result_file_name>_R{round} (inside merge_feature_tables_from_zarr).
-    - Optionally also saves the merged multi-round AnnData as <result_file_name>_R<r0>-<rN>.
+    Parameters
+    ----------
+    join
+        How to combine objects across rounds.
+        - 'outer' (default): union of Organoid_IDs across rounds (missing features become NaN)
+        - 'inner': keep only Organoid_IDs present in all rounds
+
+    validate_obs_names
+        When True, requires identical obs_names (only sensible with join='inner').
     """
 
     import anndata as ad
@@ -395,15 +401,28 @@ def merge_feature_tables_from_zarr_rounds(
     if len(ad_list) == 1:
         ad_all = ad_list[0]
     else:
+        if join not in {"inner", "outer"}:
+            raise ValueError("join must be 'inner' or 'outer'")
+
+        if join == "inner":
+            common = ad_list[0].obs_names
+            for ad_r in ad_list[1:]:
+                common = common.intersection(ad_r.obs_names)
+            if len(common) == 0:
+                raise ValueError("No overlapping Organoid_IDs across requested rounds. Use join='outer' to keep union.")
+            ad_list = [ad_r[common, :].copy() for ad_r in ad_list]
+
         if validate_obs_names:
             obs0 = ad_list[0].obs_names
             for j, ad_r in enumerate(ad_list[1:], start=1):
                 if not obs0.equals(ad_r.obs_names):
                     raise ValueError(f"obs_names mismatch between rounds {rounds[0]} and {rounds[j]}")
+
+        # join='outer' unions obs_names and fills missing values with NaN
         ad_all = ad.concat(ad_list, axis=1, merge="same", join="outer")
 
-    # Carry round list in .uns for downstream
     ad_all.uns["multiplexing_rounds"] = [int(r) for r in rounds]
+    ad_all.uns["round_join"] = join
 
     if save_merged:
         rtag = "-".join([str(int(r)) for r in rounds])
