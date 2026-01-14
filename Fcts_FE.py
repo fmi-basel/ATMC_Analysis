@@ -204,6 +204,13 @@ def _stringify_dict_keys(obj):
     return obj
 
 
+def _prefix_vars_with_round(ad_t, round_id: int):
+    """Prefix AnnData var_names with R{round}__ to match 1_FeatureExtraction naming."""
+    ad_cp = ad_t.copy()
+    ad_cp.var_names = [f"R{int(round_id)}__{v}" for v in ad_cp.var_names]
+    return ad_cp
+
+
 def merge_feature_tables_from_zarr(
     source: str,
     folder: list[str],
@@ -215,11 +222,17 @@ def merge_feature_tables_from_zarr(
     feature_table_names: str | list[str] = "features",
     roi_table_name: str = "nuclei_ROI_table",
     label_name: str = "nuclei",
+    multiplexing_round: int = 0,
     file_ending: str = ".zarr",
 ):
-    """Load and merge precomputed AnnData feature tables stored in OME-Zarr under tables/<name>.
+    """Load and merge precomputed AnnData feature tables stored in OME-Zarr under <round>/tables/<name>.
 
-    This is the functional (non-notebook) equivalent of the merging code in 1_FeatureLoading.ipynb.
+    This matches the multiplexed folder layout used by 1_FeatureExtraction:
+        <plate>.zarr/<row>/<col>/<MULTIPLEXING_ROUND>/...
+
+    Key behavior:
+    - Reads tables from the selected multiplexing_round only.
+    - Prefixes all feature names with R{multiplexing_round}__ (identical to 1_FeatureExtraction).
 
     Parameters
     ----------
@@ -243,6 +256,8 @@ def merge_feature_tables_from_zarr(
         ROI table name for downstream UID->ROI image/mask lookup.
     label_name
         Label name for downstream mask lookup.
+    multiplexing_round
+        Which round (image group name) to load features from (e.g. 0, 1, ...).
     file_ending
         Zarr file ending.
 
@@ -261,13 +276,16 @@ def merge_feature_tables_from_zarr(
     if analysis_dir is None:
         analysis_dir = source
 
+    multiplexing_round = int(multiplexing_round)
+
     if isinstance(feature_table_names, str):
         feature_table_names = [feature_table_names]
     if len(feature_table_names) == 0:
         raise ValueError("feature_table_names is empty. Provide at least one table name.")
 
-    def _load_plate(plate_path: str):
-        return ome_zarr.import_plate(plate_path)
+    def _load_plate_for_round(plate_path: str, round_id: int):
+        # important: in multiplexed datasets, each round is an image group name
+        return ome_zarr.import_plate(plate_path, image_name=str(int(round_id)))
 
     def _read_table_anndata(table_zarr_path: str):
         return read_zarr(table_zarr_path)
@@ -276,7 +294,7 @@ def merge_feature_tables_from_zarr(
 
     for plate_folder in folder:
         plate_path = os.path.join(source, plate_folder)
-        plate = _load_plate(plate_path)
+        plate = _load_plate_for_round(plate_path, multiplexing_round)
 
         wells = plate.get_names()
         well_paths = plate.paths
@@ -311,6 +329,8 @@ def merge_feature_tables_from_zarr(
                         f"obs_names order mismatch in well {well} between table {feature_table_names[0]} and {feature_table_names[j]}"
                     )
 
+            # Concatenate horizontally (axis=1) across multiple tables,
+            # then prefix with round and table name to avoid collisions.
             ad_list_pref = []
             for tname, ad_t in zip(feature_table_names, ad_list):
                 ad_cp = ad_t.copy()
@@ -318,11 +338,13 @@ def merge_feature_tables_from_zarr(
                 ad_list_pref.append(ad_cp)
 
             ad_well = ad.concat(ad_list_pref, axis=1, merge="same", join="outer")
+            ad_well = _prefix_vars_with_round(ad_well, multiplexing_round)
 
             ad_well.obs = ad_well.obs.copy()
             ad_well.obs["Barcode"] = barcode_guess
             ad_well.obs["Well"] = well
             ad_well.obs["PATH"] = path_in_plate
+            ad_well.obs["Multiplexing_Round"] = multiplexing_round
 
             idx_in_well = pd.Series(range(ad_well.n_obs), index=ad_well.obs_names)
             ad_well.obs["Organoid_ID"] = barcode_guess + "-" + well + "-" + idx_in_well.astype(str).values
@@ -351,10 +373,11 @@ def merge_feature_tables_from_zarr(
     ad_all.uns["table_name"] = roi_table_name
     ad_all.uns["label_name"] = label_name
     ad_all.uns["feature_table_names"] = feature_table_names
+    ad_all.uns["multiplexing_round"] = multiplexing_round
     ad_all.uns["experiment_ID"] = experiment_ID
     ad_all.uns["table_dir"] = os.path.join(analysis_dir, "2_Tables")
 
-    # Save
-    save_adata(ad_all, result_file_name)
+    # Save (include round in filename to avoid collisions between rounds)
+    save_adata(ad_all, f"{result_file_name}_R{multiplexing_round}")
 
     return ad_all
