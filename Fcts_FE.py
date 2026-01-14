@@ -225,47 +225,7 @@ def merge_feature_tables_from_zarr(
     multiplexing_round: int = 0,
     file_ending: str = ".zarr",
 ):
-    """Load and merge precomputed AnnData feature tables stored in OME-Zarr under <round>/tables/<name>.
-
-    This matches the multiplexed folder layout used by 1_FeatureExtraction:
-        <plate>.zarr/<row>/<col>/<MULTIPLEXING_ROUND>/...
-
-    Key behavior:
-    - Reads tables from the selected multiplexing_round only.
-    - Prefixes all feature names with R{multiplexing_round}__ (identical to 1_FeatureExtraction).
-
-    Parameters
-    ----------
-    source
-        Experiment folder containing the .zarr plate folders and Layout*.xlsx.
-    folder
-        List of plate folder names (as returned by find_zarr_dirs).
-    experiment_setup
-        Dict from make_experiment(): {barcode: {well: [Medium, ABs, Cell_line, Other]}}.
-    stainings
-        Output of get_stainings(source). Stored into .uns after key-stringification.
-    experiment_ID
-        ID of this experiment.
-    result_file_name
-        Base name used by save_adata.
-    analysis_dir
-        If None, defaults to source.
-    feature_table_names
-        Table name or list of table names inside each image group under tables/<name>.
-    roi_table_name
-        ROI table name for downstream UID->ROI image/mask lookup.
-    label_name
-        Label name for downstream mask lookup.
-    multiplexing_round
-        Which round (image group name) to load features from (e.g. 0, 1, ...).
-    file_ending
-        Zarr file ending.
-
-    Returns
-    -------
-    AnnData
-        Pooled AnnData across plates/wells.
-    """
+    """Load and merge precomputed AnnData feature tables stored in OME-Zarr under <round>/tables/<name>."""
 
     import os
     import anndata as ad
@@ -284,7 +244,6 @@ def merge_feature_tables_from_zarr(
         raise ValueError("feature_table_names is empty. Provide at least one table name.")
 
     def _load_plate_for_round(plate_path: str, round_id: int):
-        # important: in multiplexed datasets, each round is an image group name
         return ome_zarr.import_plate(plate_path, image_name=str(int(round_id)))
 
     def _read_table_anndata(table_zarr_path: str):
@@ -299,7 +258,6 @@ def merge_feature_tables_from_zarr(
         wells = plate.get_names()
         well_paths = plate.paths
 
-        # Determine barcode (prefer barcode substring in folder name)
         barcode_guess = None
         for bc in experiment_setup.keys():
             if bc in plate_folder:
@@ -329,8 +287,6 @@ def merge_feature_tables_from_zarr(
                         f"obs_names order mismatch in well {well} between table {feature_table_names[0]} and {feature_table_names[j]}"
                     )
 
-            # Concatenate horizontally (axis=1) across multiple tables,
-            # then prefix with round and table name to avoid collisions.
             ad_list_pref = []
             for tname, ad_t in zip(feature_table_names, ad_list):
                 ad_cp = ad_t.copy()
@@ -365,7 +321,6 @@ def merge_feature_tables_from_zarr(
     ad_all.obs = ad_all.obs.copy()
     ad_all.obs_names = ad_all.obs["Organoid_ID"].astype(str)
 
-    # .uns for downstream
     ad_all.uns["stainings"] = _stringify_dict_keys(stainings) if stainings is not None else {}
     ad_all.uns["experiment_setup"] = _stringify_dict_keys(experiment_setup)
     ad_all.uns["folders"] = folder
@@ -377,7 +332,81 @@ def merge_feature_tables_from_zarr(
     ad_all.uns["experiment_ID"] = experiment_ID
     ad_all.uns["table_dir"] = os.path.join(analysis_dir, "2_Tables")
 
-    # Save (include round in filename to avoid collisions between rounds)
     save_adata(ad_all, f"{result_file_name}_R{multiplexing_round}")
+
+    return ad_all
+
+
+def merge_feature_tables_from_zarr_rounds(
+    source: str,
+    folder: list[str],
+    experiment_setup: dict,
+    stainings: dict | None,
+    experiment_ID: str,
+    multiplexing_rounds: int | list[int] = 0,
+    result_file_name: str = "1_FeatureLoading",
+    analysis_dir: str | None = None,
+    feature_table_names: str | list[str] = "features",
+    roi_table_name: str = "nuclei_ROI_table",
+    label_name: str = "nuclei",
+    file_ending: str = ".zarr",
+    validate_obs_names: bool = True,
+    save_merged: bool = True,
+):
+    """Load one merged AnnData per round, then concatenate rounds along vars.
+
+    This is the one-call wrapper intended for 1_FeatureLoading.ipynb.
+
+    Notes
+    -----
+    - Each round's features are already prefixed with R{round}__ by merge_feature_tables_from_zarr.
+    - Each round is saved as <result_file_name>_R{round} (inside merge_feature_tables_from_zarr).
+    - Optionally also saves the merged multi-round AnnData as <result_file_name>_R<r0>-<rN>.
+    """
+
+    import anndata as ad
+
+    if isinstance(multiplexing_rounds, int):
+        rounds = [multiplexing_rounds]
+    else:
+        rounds = list(multiplexing_rounds)
+
+    if len(rounds) == 0:
+        raise ValueError("multiplexing_rounds is empty. Provide at least one round id.")
+
+    ad_list = []
+    for r in rounds:
+        ad_r = merge_feature_tables_from_zarr(
+            source=source,
+            folder=folder,
+            experiment_setup=experiment_setup,
+            stainings=stainings,
+            experiment_ID=experiment_ID,
+            result_file_name=result_file_name,
+            analysis_dir=analysis_dir,
+            feature_table_names=feature_table_names,
+            roi_table_name=roi_table_name,
+            label_name=label_name,
+            multiplexing_round=int(r),
+            file_ending=file_ending,
+        )
+        ad_list.append(ad_r)
+
+    if len(ad_list) == 1:
+        ad_all = ad_list[0]
+    else:
+        if validate_obs_names:
+            obs0 = ad_list[0].obs_names
+            for j, ad_r in enumerate(ad_list[1:], start=1):
+                if not obs0.equals(ad_r.obs_names):
+                    raise ValueError(f"obs_names mismatch between rounds {rounds[0]} and {rounds[j]}")
+        ad_all = ad.concat(ad_list, axis=1, merge="same", join="outer")
+
+    # Carry round list in .uns for downstream
+    ad_all.uns["multiplexing_rounds"] = [int(r) for r in rounds]
+
+    if save_merged:
+        rtag = "-".join([str(int(r)) for r in rounds])
+        save_adata(ad_all, f"{result_file_name}_R{rtag}")
 
     return ad_all
