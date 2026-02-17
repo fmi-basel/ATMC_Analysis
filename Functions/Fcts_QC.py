@@ -13,13 +13,13 @@ QUALITY CONTROL FUNCTIONS
 
 
 def calculate_outgrowth(ad, n_seeded):
-    """
+    """"""
     Calculate outgrowth efficiency for each well.
 
     Parameters:
     - ad (anndata.AnnData): AnnData object containing organoid data.
     - n_seeded (int): Number of cells seeded per well (assumed constant).
-    """
+    """"""
     import pandas as pd
 
     experiment_setup = ad.uns["experiment_setup"]
@@ -59,13 +59,14 @@ def calculate_outgrowth(ad, n_seeded):
     ad.uns["Outgrowth_DF"] = outgrowth
     return ad
 
+
 def build_heatmap_df(plate_size):
-    """
+    """"""
     Build an empty DataFrame for heatmap plotting based on the plate size.
 
     Parameters:
     - plate_size (int): Size of the plate (96 or 384).
-    """ 
+    """"""
 
     if plate_size == 384:
         index_lst = ["A", "B" , "C", "D", "E", "F", "G", "H", "I", "J", "K" , "L" , "M" , "N" , "O", "P"]
@@ -73,14 +74,14 @@ def build_heatmap_df(plate_size):
         for i,el in enumerate(col_lst):
             if len(el) == 1:
                 col_lst[i] = str(0)+el
-                
+
     if plate_size == 96:
         index_lst = ["A", "B" , "C", "D", "E", "F", "G", "H"]
         col_lst = [str(x) for x in range(1,13)]
         for i,el in enumerate(col_lst):
             if len(el) == 1:
                 col_lst[i] = str(0)+el
-        
+
     df_plot_HM = pd.DataFrame(np.nan, index = index_lst, columns = col_lst)
 
     if (plate_size != 96) and (plate_size != 384):
@@ -88,48 +89,49 @@ def build_heatmap_df(plate_size):
 
     return df_plot_HM
 
+
 def plate_bias_overview(plt_features, ad, plate_size):
-    """
+    """"""
     Generate heatmaps illustrating plate bias based on specified features and experimental conditions.
 
     Parameters:
     - plt_features (list): List of features for heatmap plotting.
     - ad (anndata.AnnData): AnnData object containing organoid data.
     - plate_size (int): Size of the plate (96 or 384).
-    """   
-    
-    for feat in plt_features:   
-        
+    """"""
+
+    for feat in plt_features:
+
         for day in ad.obs["Other"].unique():
 
             fig, ax = plt.subplots(ncols = 1, nrows = 1, figsize =(10,5))
-            
+
             # Built empty DF
             df_HM = build_heatmap_df(plate_size)
-        
+
             # Go through conds and use compute minmax scale
             df = pd.concat([ad[ad.obs.Other == day].to_df(), ad[ad.obs.Other == day].obs.astype(str)], axis = 1)
-            
+
             for cellline in df.Cell_line.unique():
-                
-                for medium in df.Medium.unique():   
+
+                for medium in df.Medium.unique():
 
                     # Take values and filter
                     df_plt = df[(df.Cell_line == cellline) & (df.Medium == medium)].copy(deep = True)
 
-                    # z-scoring  
+                    # z-scoring
                     mean = np.mean(df_plt[feat])
                     sd = np.std(df_plt[feat], axis = 0)
                     df_plt.loc[:,"plt"] = abs(df_plt[feat].transform(lambda x : (x - mean)/sd))
-                    
+
                     # GroupBy
-                    grouped = df_plt.groupby(["Well"])["plt"].mean().to_frame() 
+                    grouped = df_plt.groupby(["Well"])["plt"].mean().to_frame()
 
                     # Put into heatmap based on well
                     for well in grouped.index:
                         df_HM.loc[well[0], well[1:]] = grouped.loc[well]["plt"]
-            
-            
+
+
             # Plot
             f1 = sns.heatmap(data= df_HM,
                     linewidth = 1,
@@ -143,8 +145,8 @@ def plate_bias_overview(plt_features, ad, plate_size):
             ax.set_title(day+" "+feat, fontsize = 18, y = 1.05)
 
             fig.tight_layout()
-    
-        
+
+
     for day in ad.obs["Other"].unique():
 
         fig, ax = plt.subplots(ncols = 1, nrows = 1, figsize =(10,5))
@@ -158,22 +160,22 @@ def plate_bias_overview(plt_features, ad, plate_size):
 
         for cellline in df.Cell_line.unique():
 
-            for medium in df.Medium.unique():   
+            for medium in df.Medium.unique():
 
                 # Take values and filter
                 df_plt = df[(df.Cell_line == cellline) & (df.Medium == medium)].copy(deep = True)
 
-                # z-scoring  
+                # z-scoring
                 df_plt.loc[:,"plt"] = abs(df_plt["Organoid_No"].transform(lambda x : (x - np.mean(df_plt[["Organoid_No"]]))/np.std(df_plt[["Organoid_No"]], axis = 0)))
 
                 # Group and compute medians
-                grouped = df_plt.groupby(["Well"])["plt"].mean().to_frame() 
+                grouped = df_plt.groupby(["Well"])["plt"].mean().to_frame()
 
 
                 # Put into heatmap based on well
                 for well in grouped.index:
                     df_HM.loc[well[0], well[1:]] = grouped.loc[well]["plt"]
-                
+
         # Plot outgrowth
         f1 = sns.heatmap(data= df_HM,
                 linewidth = 1,
@@ -188,8 +190,10 @@ def plate_bias_overview(plt_features, ad, plate_size):
 
         fig.tight_layout()
 
+
+
 def normalize_groups(adata, group_by, control=None):
-    """
+    """"""
     Normalize data in an AnnData object by groups, applying log1p transformation
     to area-associated features, and then creating separate layers for robust scaling,
     z-normalization and min-max scaling.
@@ -200,7 +204,7 @@ def normalize_groups(adata, group_by, control=None):
     control (dict, optional): A dictionary specifying the control group for normalization.
         The key is the column name, and the value is the control group value.
         If None, each group is normalized independently.
-    """
+    """"""
 
     if isinstance(group_by, str):
         group_by = [group_by]
@@ -295,6 +299,7 @@ def normalize_groups(adata, group_by, control=None):
 
     return adata
 
+
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -302,12 +307,12 @@ import seaborn as sns
 
 
 def build_heatmap_df(plate_size):
-    """
+    """"""
     Build an empty dataframe representing the plate layout for heatmap visualization.
 
     Parameters:
     - plate_size (int): Plate size, either 96 or 384.
-    """
+    """"""
     if plate_size == 384:
         rows = list("ABCDEFGHIJKLMNOP")
         cols = [f"{i:02d}" for i in range(1, 25)]
@@ -320,7 +325,7 @@ def build_heatmap_df(plate_size):
 
 
 def plot_heatmap_with_means(data_df, title, ax=None):
-    """
+    """"""
     Plot plate layout heatmap with extra row and column showing means per row and per column.
     Adds a closed rectangular border around the entire heatmap.
 
@@ -328,7 +333,7 @@ def plot_heatmap_with_means(data_df, title, ax=None):
     - data_df: pd.DataFrame formatted with rows and columns matching plate layout
     - title: str, title for the heatmap
     - ax: matplotlib Axes or None
-    """
+    """"""
     import numpy as np
     import seaborn as sns
     import matplotlib.pyplot as plt
@@ -387,7 +392,7 @@ def plate_bias_overview(
     control_condition=None,
     control_only=False,
 ):
-    """
+    """"""
     Generate plate-layout heatmaps per feature and day to visualize spatial bias.
     Optionally filter to only plot wells matching a specified control condition.
 
@@ -399,7 +404,7 @@ def plate_bias_overview(
         Specifies condition(s) to filter wells for plotting.
     - control_only: bool, default False
         If True, only wells matching control_condition are plotted.
-    """
+    """"""
     def passes_control_condition(obs_row, condition):
         # Check if the observation row satisfies all key-value pairs in condition dict
         return all(obs_row.get(k, None) == v for k, v in condition.items())

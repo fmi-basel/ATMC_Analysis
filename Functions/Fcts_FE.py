@@ -24,7 +24,7 @@ import math
 import cv2
 import os
 
-from Fcts_Base import find_staining_in_ABs, load_img_mask_by_UID, find_barcodes_with_day, save_adata
+from Functions.Fcts_Base import find_staining_in_ABs, load_img_mask_by_UID, find_barcodes_with_day, save_adata
 
 # Disable pandas performance warnings
 from warnings import simplefilter
@@ -56,6 +56,9 @@ Strategy:
 - intensity features: computed per round and prefixed with R{round}__
 - Pearson correlations: computed across all (round, stain) vectors (within + between rounds)
 """
+
+# NOTE: This file is a direct copy of the former top-level Fcts_FE.py with only import paths updated.
+
 
 def make_experiment(source, layout_sheets = ["MediumLayout", "StainingLayout", "LineLayout", "OtherLayout"]):
     """
@@ -199,6 +202,7 @@ def make_experiment(source, layout_sheets = ["MediumLayout", "StainingLayout", "
         print(bc)
     return result, barcodes
 
+
 def display_experiment_setup(experiment):
     """
     Display the experiment setup for each barcode.
@@ -224,6 +228,7 @@ def display_experiment_setup(experiment):
         display(df_hm)
     
     return None
+
 
 def threshold_change(threshold, staining, new_threshold):
     """
@@ -255,6 +260,7 @@ def dict_add_feat(d, feat_name, value):
 
     return d
 
+
 def get_max_inscribed_circle(image, radius_multiplier, value):
     """
     Get the largest inscribed circle in a binary image.
@@ -277,6 +283,7 @@ def get_max_inscribed_circle(image, radius_multiplier, value):
     mask_circle[(x_range - center[0])**2 + (y_range - center[1])**2 <= (radius*radius_multiplier)**2] = value
     
     return mask_circle, radius, center
+
  
 def calculate_eucl_distance(x1, y1, x2, y2, spacing):
     """
@@ -287,6 +294,7 @@ def calculate_eucl_distance(x1, y1, x2, y2, spacing):
     - spacing (float): Spacing factor, usually pixel size.
     """
     return np.sqrt((x1 - x2)**2 + (y1 - y2)**2) * spacing
+
 
 def define_center_touching_branches(df, center_mask):
     """
@@ -318,6 +326,7 @@ def define_center_touching_branches(df, center_mask):
     df["Touching"] = touching
     
     return df
+
 
 def determine_skeleton_endpoints(skeleton_data, center, spacing):
     """
@@ -352,6 +361,7 @@ def determine_skeleton_endpoints(skeleton_data, center, spacing):
             
     return skeleton_data
 
+
 def find_adjacent_nonzero_pixel(pixel_coords, image):
     """
     Find adjacent non-zero pixel coordinates to a skeleton pixel.
@@ -385,6 +395,7 @@ def find_adjacent_nonzero_pixel(pixel_coords, image):
     endpoint = 1
     return y, x , endpoint
 
+
 def calculate_angle(pixel1_coords, pixel2_coords):
     """
     Calculate the angle between two pixels.
@@ -407,6 +418,7 @@ def calculate_angle(pixel1_coords, pixel2_coords):
     angle_degrees = (angle_degrees + 360) % 360
 
     return angle_degrees
+
 
 def calculate_endpoint(start_coords, angle_degrees, raw):
     """
@@ -459,6 +471,7 @@ def calculate_endpoint(start_coords, angle_degrees, raw):
 
     return x_endpoint, y_endpoint
 
+
 def draw_line(image, start_coords, end_coords):
     """
     Draw a line on an image given the starting and ending coordinates.
@@ -508,6 +521,7 @@ def draw_line(image, start_coords, end_coords):
 
     return image_with_line
 
+
 def find_indices_except_two_highest(lst):
     """
     Find indices of elements in a list, excluding the indices of the two highest values.
@@ -519,6 +533,7 @@ def find_indices_except_two_highest(lst):
     sorted_indices = sorted(range(len(lst)), key=lambda i: lst[i])  # Sort the indices based on the values
     result_indices = sorted_indices[:-2]  # Retrieve all indices except the last two (highest values)
     return result_indices
+
 
 def skeleton_feats(images, row_data, OID, spacing, sigma_skeleton, radius_multiplier=0.5):
     """
@@ -540,6 +555,7 @@ def skeleton_feats(images, row_data, OID, spacing, sigma_skeleton, radius_multip
     row_data["crypt_length_total"] = crypt_length_total
     row_data["crypt_length_max"] = longest_crypt
     return row_data
+
 
 def extract_skeleton_features(image, spacing, sigma_skeleton=3, radius_multiplier=0.5, n_angle_determination=50):
     """
@@ -592,6 +608,7 @@ def extract_skeleton_features(image, spacing, sigma_skeleton=3, radius_multiplie
 
     return skeleton, mask_circle, radius, center, 0, 0, 0
 
+
 def pad_to_aspect_ratio(image, target_aspect_ratio = 1.0):
     """
     Pad a 2D image with black pixels to achieve a target aspect ratio without distortion.
@@ -623,6 +640,7 @@ def pad_to_aspect_ratio(image, target_aspect_ratio = 1.0):
         padded_image = np.pad(image, ((pad_top, pad_bottom), (0, 0)), mode='constant', constant_values=0)
 
     return padded_image
+
 
 def test_skeletonization(barcodes, ome_zarrs_dict, ome_zarr_df, table_name, label_name, pyramid_level=0,
                         n=5, seed=0, sigma_skeleton=3, n_angle_determination=50, radius_multiplier=0.5):
@@ -682,6 +700,7 @@ def test_skeletonization(barcodes, ome_zarrs_dict, ome_zarr_df, table_name, labe
         plt.tight_layout()
         plt.show()
 
+
 def image_preprocessing(stainings, experiment_setup, images, OID, thresholds, sigma = 3):
     """
     Preprocess images by blurring them with a gaussian kernel, setting values outside the mask to 0, and thresholding image based on stain-specific mask.
@@ -721,6 +740,7 @@ def image_preprocessing(stainings, experiment_setup, images, OID, thresholds, si
         images[f"C0{channel+1}_Mask"] = image.astype(bool)
         
     return images
+
 
 def get_border_fraction(mask, row_data, OID):
     """
@@ -771,6 +791,7 @@ def get_border_fraction(mask, row_data, OID):
     row_data["StraightEdge_longest_fraction"] = max_fraction
 
     return row_data
+
 
 def shape_calc_mask(mask, row_data, OID, spacing):
     """
@@ -840,6 +861,7 @@ def shape_calc_mask(mask, row_data, OID, spacing):
 
     return row_data
 
+
 def channel_mask_feat_calc(mask, mask_channel, staining, row_data, OID, spacing):
     """
     Calculate staining features related to the whole segmentation mask of an object.
@@ -876,6 +898,7 @@ def channel_mask_feat_calc(mask, mask_channel, staining, row_data, OID, spacing)
         row_data[f"{staining}_asymmetry"] = 1
 
     return row_data
+
 
 def convex_hull_features(mask, row_data, OID, spacing, min_area_fraction=0.005):
     """
@@ -932,6 +955,7 @@ def convex_hull_features(mask, row_data, OID, spacing, min_area_fraction=0.005):
 
     return row_data
 
+
 def moments_channel_mask(mask, int_image, row_data, OID, staining, spacing):
     """
     Calculate moments-based features for a staining channel within the segmented object.
@@ -968,6 +992,7 @@ def moments_channel_mask(mask, int_image, row_data, OID, staining, spacing):
         row_data[col] = df_props.at[OID, col]
 
     return row_data
+
 
 def intensity_feat_calc(img, mask, mask_channel, row_data, staining, OID, quantiles_to_calc):
     """
@@ -1072,10 +1097,12 @@ def intensity_feat_calc(img, mask, mask_channel, row_data, staining, OID, quanti
     return row_data
 
 
+
 def _as_path_str(p) -> str:
     if isinstance(p, (list, tuple)) and len(p) > 0:
         p = p[0]
     return str(p)
+
 
 
 def _parse_well_round_from_path(path: str) -> tuple[str, int] | tuple[None, None]:
@@ -1093,6 +1120,7 @@ def _parse_well_round_from_path(path: str) -> tuple[str, int] | tuple[None, None
     return f"{row}{col}", rnd_int
 
 
+
 def build_well_round_map(plate) -> dict[tuple[str, int], object]:
     """Map (well, round) -> ez_zarr Image object (for the images contained in this plate object)."""
     m = {}
@@ -1108,6 +1136,7 @@ def build_well_round_map(plate) -> dict[tuple[str, int], object]:
 _PLATE_CACHE: dict[tuple[str, int], object] = {}
 
 
+
 def _infer_plate_root_from_image_path(img_path: str) -> str:
     """Infer the plate root (.zarr) path from an image path ending with /<row>/<col>/<image_name>."""
     parts = _as_path_str(img_path).replace("\\", "/").rstrip("/").split("/")
@@ -1115,6 +1144,7 @@ def _infer_plate_root_from_image_path(img_path: str) -> str:
         return _as_path_str(img_path)
     # remove last 3: row/col/image_name
     return "/".join(parts[:-3])
+
 
 
 def _default_round_from_plate(plate) -> int:
@@ -1129,6 +1159,7 @@ def _default_round_from_plate(plate) -> int:
     return 0
 
 
+
 def _plate_root_from_plate(plate) -> str:
     """Infer plate root path from the first available image path."""
     if hasattr(plate, "images") and len(plate.images) > 0:
@@ -1137,6 +1168,7 @@ def _plate_root_from_plate(plate) -> str:
     if hasattr(plate, "paths") and plate.paths:
         return _infer_plate_root_from_image_path(plate.paths[0])
     raise ValueError("Cannot infer plate root path from plate object")
+
 
 
 def get_plate_for_round(plate, round_id: int):
@@ -1153,6 +1185,7 @@ def get_plate_for_round(plate, round_id: int):
     return _PLATE_CACHE[key]
 
 
+
 def build_well_round_map_multi(plate, rounds: set[int]) -> dict[tuple[str, int], object]:
     """Build a (well, round)->image map across multiple rounds by importing each round plate."""
     m_all: dict[tuple[str, int], object] = {}
@@ -1162,11 +1195,13 @@ def build_well_round_map_multi(plate, rounds: set[int]) -> dict[tuple[str, int],
     return m_all
 
 
+
 def get_stains_for_round(stainings: dict, ab_key: str, round_id: int) -> list[str]:
     v = stainings.get(ab_key, [])
     if isinstance(v, dict):
         return v.get(int(round_id), [])
     return v
+
 
 
 def normalize_thresholds(thresholds):
@@ -1197,12 +1232,14 @@ def normalize_thresholds(thresholds):
     raise ValueError("Unrecognized thresholds format")
 
 
+
 def morphology_features(mask, row_data, OID, spacing, sigma_skeleton, radius_multiplier):
     row_data = shape_calc_mask(mask, row_data, OID, spacing)
     row_data = convex_hull_features(mask, row_data, OID, spacing, min_area_fraction=0.005)
     row_data = get_border_fraction(mask, row_data, OID)
     row_data = skeleton_feats({"Mask": mask}, row_data, OID, spacing, sigma_skeleton, radius_multiplier)
     return row_data
+
 
 
 def intensity_features_for_round(
@@ -1266,6 +1303,7 @@ def intensity_features_for_round(
     return row_data_round, vectors
 
 
+
 def pearson_features_from_vectors(vectors: dict[str, np.ndarray]) -> dict:
     out = {}
     keys = sorted(vectors.keys())
@@ -1282,6 +1320,7 @@ def pearson_features_from_vectors(vectors: dict[str, np.ndarray]) -> dict:
         out[f"{k1}--{k2}_PearsonR"] = r
 
     return out
+
 
 
 def estimate_staining_thresholds_multicycle(
@@ -1420,6 +1459,7 @@ def estimate_staining_thresholds_multicycle(
     return thresholds, dict_org, timepoints_lst
 
 
+
 def plot_thresholds_multicycle(
     thresholds,
     dict_org,
@@ -1523,6 +1563,7 @@ def plot_thresholds_multicycle(
 
     plt.tight_layout()
     plt.show()
+
 
 
 def extract_features_multicycle(
@@ -1749,6 +1790,7 @@ def extract_features_multicycle(
     save_adata(ad, f"{result_file_name}_{timestamp}")
     return ad
 
+
 def _stringify_dict_keys(obj):
     if isinstance(obj, dict):
         return {str(k): _stringify_dict_keys(v) for k, v in obj.items()}
@@ -1757,11 +1799,13 @@ def _stringify_dict_keys(obj):
     return obj
 
 
+
 def _prefix_vars_with_round(ad_t, round_id: int):
     """Prefix AnnData var_names with R{round}__ to match 1_FeatureExtraction naming."""
     ad_cp = ad_t.copy()
     ad_cp.var_names = [f"R{int(round_id)}__{v}" for v in ad_cp.var_names]
     return ad_cp
+
 
 
 def merge_feature_tables_from_zarr(
@@ -1888,6 +1932,7 @@ def merge_feature_tables_from_zarr(
     save_adata(ad_all, f"{result_file_name}_R{multiplexing_round}")
 
     return ad_all
+
 
 
 def merge_feature_tables_from_zarr_rounds(

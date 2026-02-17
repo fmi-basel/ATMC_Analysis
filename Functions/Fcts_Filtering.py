@@ -1,4 +1,4 @@
-from Fcts_Base import load_img_mask_by_UID
+from Functions.Fcts_Base import load_img_mask_by_UID
 import matplotlib.pyplot as plt
 import random
 import math
@@ -63,7 +63,7 @@ def filter_rows_by_percentile_bounds(
     for feat in features:
         s = df_annot[feat]
         lo = s.quantile(lower_q)
-        hi = s.quantile(upper_q)  # quantile API [web:250]
+        hi = s.quantile(upper_q)
 
         if keep_na:
             flag = s.notna() & (s.lt(lo) | s.gt(hi))
@@ -78,7 +78,7 @@ def filter_rows_by_percentile_bounds(
         )
 
     # Summary tagging (before filtering)
-    df_annot[f"{flag_prefix}__any"] = flags.any(axis=1)  # row-wise union [web:279]
+    df_annot[f"{flag_prefix}__any"] = flags.any(axis=1)
     df_annot[f"{flag_prefix}__features"] = flags.apply(
         lambda r: ",".join(r.index[r.values]),
         axis=1,

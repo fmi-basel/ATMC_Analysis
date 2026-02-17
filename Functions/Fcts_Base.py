@@ -96,7 +96,7 @@ def save_adata(adata, filename, keys_to_remove = ["ome_zarr_dict", "ome_zarr_df"
     # Find unique save path to avoid overwriting
     while os.path.exists(savepath):
         i += 1
-        savepath = os.path.join(path, f"{filename}-v{i+1}.h5ad")
+        savepath = os.path.join(path, f"{filename}{i}.h5ad")
 
     # Backup keys to remove to restore later
     backup = {}
@@ -216,7 +216,7 @@ def load_img_mask_by_UID(UID, ome_zarr_dict, table_name, label_name, pyramid_lev
     # Check if index is valid
     if index < 0 or index >= len(table):
         raise IndexError(f"Index {index} out of bounds for table length {len(table)}")
-
+    
 
 
     # Get row and coordinates
@@ -248,7 +248,7 @@ def load_img_mask_by_UID(UID, ome_zarr_dict, table_name, label_name, pyramid_lev
 
     return img, mask
 
-def find_zarr_dirs(root_dir, file_ending = ".zarr",max_depth=None):
+def find_zarr_dirs(root_dir, max_depth=None):
     """
     Finds all OME-Zarr directories within a given root directory,
     stopping at the first depth where any are found.
@@ -282,7 +282,7 @@ def find_zarr_dirs(root_dir, file_ending = ".zarr",max_depth=None):
         # Find .zarr folders at this level
         this_level_zarrs = [
             os.path.join(current_dir, d)
-            for d in dirnames if d.endswith(file_ending)
+            for d in dirnames if d.endswith('.zarr')
         ]
 
         if this_level_zarrs:
@@ -309,20 +309,17 @@ def find_zarr_dirs(root_dir, file_ending = ".zarr",max_depth=None):
     return natsorted(zarr_dirs)
 
 def find_staining_in_ABs(stainings, staining_to_find):
-    """Find AB mixes that contain a staining, supporting both legacy and round-aware stainings."""
-
+    """
+    Finds the AB mixes that contain the given staining.
+    
+    Parameters:
+    - stainings (dict): A dictionary where the keys are AB mix names and the values are lists of stainings.
+    - staining_to_find (str): The staining to search for.
+    """
     found_in = []
-    for mix, v in stainings.items():
-        if isinstance(v, dict):
-            # round-aware
-            for _, stains in v.items():
-                if staining_to_find in stains:
-                    found_in.append(mix)
-                    break
-        else:
-            # legacy list
-            if staining_to_find in v:
-                found_in.append(mix)
+    for mix, stainings_list in stainings.items():
+        if staining_to_find in stainings_list:
+            found_in.append(mix)
     return found_in
 
 def find_barcodes_with_day(experiment_setup, d_string):
@@ -383,17 +380,10 @@ def extract_ome_zarr_tables(experiment_setup, source, folder, table_name):
 
         # Annotate each DataFrame with well and path
         for df, well, path in zip(df_lst, wells, paths):
-            if df is None or df.empty:
-                continue
             df['well'] = well
             df['path'] = path
 
-        # Keep only non-empty tables
-        df_lst_nonempty = [df for df in df_lst if df is not None and not df.empty]
-        if len(df_lst_nonempty) == 0:
-            continue
-
-        plate_df = pd.concat(df_lst_nonempty, ignore_index=False)
+        plate_df = pd.concat(df_lst, ignore_index=False)
         plate_df["Barcode"] = barcode
         plate_df["UID"] = barcode + "-" + plate_df["well"].astype(str) + "-" + plate_df.index.astype(str)
 
@@ -405,7 +395,7 @@ def extract_ome_zarr_tables(experiment_setup, source, folder, table_name):
 
         all_plate_dfs.append(plate_df)
 
-    ome_zarr_df = pd.concat(all_plate_dfs, ignore_index=True) if len(all_plate_dfs) else pd.DataFrame()
+    ome_zarr_df = pd.concat(all_plate_dfs, ignore_index=True)
 
     return ome_zarr_dict, ome_zarr_df
 
@@ -505,23 +495,20 @@ def get_pipetting_info(source, layout_sheet="StainingLayout"):
 def get_stainings(source, sheet="StainingLayout"):
     """
     Extract antibody staining information from an Excel file describing immunostaining layout.
-
-    Supports both:
-    - legacy layouts without 'Round' column (all channels are treated as round 0)
-    - multicycle layouts with a 'Round' column (int or numeric string)
-
-    Returns
-    -------
-    out : dict
-        Mapping of antibody mix -> either:
-        - dict(round -> list of stains by channel) if 'Round' column exists
-        - list of stains by channel (legacy)
-
-    Notes
-    -----
-    The returned structure is round-aware if 'Round' exists. Downstream code should handle both.
+    
+    This function locates a file matching 'Layout*.xlsx' in the given source folder, reads the specified 
+    sheet, and parses the table to extract which antibody targets ('Target') are assigned to which 
+    antibody mixes ('Antibody Mix'), sorted by imaging channel number.
+    
+    Parameters
+    ----------
+    source : str
+        Directory path where the Excel layout file(s) are stored. A file matching 'Layout*.xlsx'
+        will be used.
+    sheet : str, optional
+        Name of the sheet in the Excel file to read. Default is 'StainingLayout'.
     """
-
+    
     filename = glob.glob(source+'/Layout*.xlsx')[0]
 
     df = pd.read_excel(filename, sheet_name=sheet, header=None)
@@ -551,46 +538,31 @@ def get_stainings(source, sheet="StainingLayout"):
     tab = tab[~tab["Type"].astype(str).str.lower().str.contains("secondary")]
     tab["Imaging Channel"] = tab["Imaging Channel"].astype(str).str.strip()
     tab = tab[tab["Imaging Channel"] != ""]
-
-    # Round handling (optional)
-    has_round = "Round" in tab.columns
-    if has_round:
-        tab["Round"] = pd.to_numeric(tab["Round"], errors="coerce").fillna(0).astype(int)
-    else:
-        tab["Round"] = 0
-
     # Explode mixes: a row can list more than one (e.g 'AB1, AB2')
     mix_rows = []
-    for _, row in tab.iterrows():
+    for idx, row in tab.iterrows():
         mixentries = [m.strip() for m in str(row["Antibody Mix"]).split(",") if m.strip()]
         for mix in mixentries:
             data = row.to_dict()
             data["Antibody Mix"] = mix
             mix_rows.append(data)
     dfmix = pd.DataFrame(mix_rows)
-
-    # Build output: mix -> round -> stains list
-    out: dict[str, dict[int, list[str]]] = {}
-    for (mix, rnd), g in dfmix.groupby(["Antibody Mix", "Round"]):
+    # For each mix: check duplicate channels, build sorted list of Target
+    out = {}
+    for mix, g in dfmix.groupby("Antibody Mix"):
         g = g.copy()
+        # Check for duplicate channels
         chlist = g["Imaging Channel"].astype(float)
         if chlist.duplicated().any():
-            raise ValueError(f"Duplicate channel for mix {mix}, round {rnd}: {list(g['Imaging Channel'])}")
+            raise ValueError(f"Duplicate channel for mix {mix}: {list(g['Imaging Channel'])}")
         stains = g.sort_values("Imaging Channel")["Target"].tolist()
-        out.setdefault(mix, {})[int(rnd)] = stains
+        out[mix] = stains
 
-    # Print summary
     print(f"Found {len(out)} staining mixes in experiment setup:")
-    for mix, rounds in out.items():
-        rounds_str = ", ".join([f"R{r}({v})" for r, v in sorted(rounds.items())])
-        print(f"  {mix}: {rounds_str}")
+    for mix, targets in out.items():
+        print(f"  {mix}: {', '.join(targets)}")
 
     get_pipetting_info(source)
-
-    # Backward compatibility: if no Round column, collapse to legacy list
-    if not has_round:
-        legacy = {mix: rounds.get(0, []) for mix, rounds in out.items()}
-        return legacy
 
     return out
 
