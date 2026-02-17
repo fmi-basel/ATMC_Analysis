@@ -793,7 +793,7 @@ def get_border_fraction(mask, row_data, OID):
     return row_data
 
 
-def shape_calc_mask(mask, row_data, OID, spacing):
+def shape_calc_mask(mask, row_data, OID, spacing, include_moments: bool = True):
     """
     Calculate various shape features for a segmented object.
 
@@ -802,13 +802,14 @@ def shape_calc_mask(mask, row_data, OID, spacing):
     - row_data (dict): Dictionary to store the calculated features.
     - OID (str): Object ID (kept for API consistency).
     - spacing (float): Pixel spacing.
+    - include_moments (bool): If False, do not compute regionprops 'moments' (saves time + columns).
 
     Returns:
     - row_data (dict): Updated with shape features.
     """
 
     # Define properties to calculate
-    features = (
+    features = [
         'area',
         'area_bbox',
         'area_convex',
@@ -819,13 +820,19 @@ def shape_calc_mask(mask, row_data, OID, spacing):
         'equivalent_diameter_area',
         'extent',
         'feret_diameter_max',
-        'moments',
         'perimeter',
-        'solidity'
-    )
+        'solidity',
+    ]
+    if include_moments:
+        features.append('moments')
 
     # Compute region properties table (returns dict of arrays)
-    props = measure.regionprops_table(mask.astype(np.uint8), properties=features, spacing=(spacing, spacing), cache=True)
+    props = measure.regionprops_table(
+        mask.astype(np.uint8),
+        properties=tuple(features),
+        spacing=(spacing, spacing),
+        cache=True,
+    )
 
     # Convert to DataFrame for easier access
     df_props = pd.DataFrame(props, index=[OID])
@@ -860,6 +867,7 @@ def shape_calc_mask(mask, row_data, OID, spacing):
         row_data["aspectRatio_equivalentDiameter"] = np.nan
 
     return row_data
+
 
 
 def channel_mask_feat_calc(mask, mask_channel, staining, row_data, OID, spacing):
@@ -994,107 +1002,107 @@ def moments_channel_mask(mask, int_image, row_data, OID, staining, spacing):
     return row_data
 
 
-def intensity_feat_calc(img, mask, mask_channel, row_data, staining, OID, quantiles_to_calc):
+def intensity_feat_calc(
+    img,
+    mask,
+    mask_channel,
+    row_data,
+    staining,
+    OID,
+    quantiles_to_calc,
+    include_thresholded: bool = True,
+    include_substructure: bool = True,
+):
     """
     Calculate intensity-based features for a staining channel within a segmented object.
 
     Parameters:
-    - img (numpy.ndarray): Original intensity image.
-    - mask (numpy.ndarray): Binary mask representing the segmented object.
-    - mask_channel (numpy.ndarray): Binary mask representing a specific staining channel.
-    - row_data (dict): Dictionary to store the calculated features.
-    - staining (str): Name of the staining channel.
-    - OID (str): Object ID (kept for API consistency).
-    - quantiles_to_calc (list): List of quantiles to calculate (values between 0 and 1).
-    
-    Returns:
-    - row_data (dict): Updated with intensity-based features.
+    - include_thresholded: if False, do NOT compute any _T_ features (incl. T-quantiles, potency, area_T).
+    - include_substructure: if False, do NOT run Otsu + connected component substructure analysis.
     """
 
-    # Mask indices with bool arrays once for efficiency
     mask_bool = mask.astype(bool)
     mask_chan_bool = mask_channel.astype(bool)
 
     img_masked = img[mask_bool]
 
-    # Basic intensity features in full mask
+    # --- Always compute full-mask intensity stats ---
     row_data[f"{staining}_min"] = np.min(img_masked) if img_masked.size > 0 else 0
     row_data[f"{staining}_mean"] = np.mean(img_masked) if img_masked.size > 0 else 0
     row_data[f"{staining}_max"] = np.max(img_masked) if img_masked.size > 0 else 0
     row_data[f"{staining}_std"] = np.std(img_masked) if img_masked.size > 0 else 0
 
-    if np.any(mask_chan_bool):
-        img_mask_chan = img[mask_chan_bool]
-        row_data[f"{staining}_T_min"] = np.min(img_mask_chan)
-        row_data[f"{staining}_T_mean"] = np.mean(img_mask_chan)
-        row_data[f"{staining}_T_max"] = np.max(img_mask_chan)
-        row_data[f"{staining}_T_std"] = np.std(img_mask_chan)
-    else:
-        row_data[f"{staining}_T_min"] = 0
-        row_data[f"{staining}_T_mean"] = 0
-        row_data[f"{staining}_T_max"] = 0
-        row_data[f"{staining}_T_std"] = 0
-
-    # Quantiles for full mask and threshold mask_channel
+    # Full-mask quantiles
     for q in quantiles_to_calc:
         q_name = str(int(q * 100))
         row_data[f"{staining}_Q{q_name}"] = np.quantile(img_masked, q=q) if img_masked.size > 0 else 0
 
+    # --- Optional: thresholded (_T_) features ---
+    if include_thresholded:
         if np.any(mask_chan_bool):
-            row_data[f"{staining}_T_Q{q_name}"] = np.quantile(img[mask_chan_bool], q=q)
+            img_mask_chan = img[mask_chan_bool]
+            row_data[f"{staining}_T_min"] = np.min(img_mask_chan)
+            row_data[f"{staining}_T_mean"] = np.mean(img_mask_chan)
+            row_data[f"{staining}_T_max"] = np.max(img_mask_chan)
+            row_data[f"{staining}_T_std"] = np.std(img_mask_chan)
         else:
-            row_data[f"{staining}_T_Q{q_name}"] = 0
+            row_data[f"{staining}_T_min"] = 0
+            row_data[f"{staining}_T_mean"] = 0
+            row_data[f"{staining}_T_max"] = 0
+            row_data[f"{staining}_T_std"] = 0
 
-    # Potency: mean intensity * area of T (thresholded mask)
-    area_T = np.sum(mask_chan_bool)
-    row_data[f"{staining}_area_T"] = area_T
-    row_data[f"{staining}_potency"] = row_data[f"{staining}_mean"] * area_T
+        for q in quantiles_to_calc:
+            q_name = str(int(q * 100))
+            if np.any(mask_chan_bool):
+                row_data[f"{staining}_T_Q{q_name}"] = np.quantile(img[mask_chan_bool], q=q)
+            else:
+                row_data[f"{staining}_T_Q{q_name}"] = 0
 
-    # Substructure analysis
+        # Potency: mean intensity * area of T (thresholded mask)
+        area_T = int(np.sum(mask_chan_bool))
+        row_data[f"{staining}_area_T"] = area_T
+        row_data[f"{staining}_potency"] = row_data[f"{staining}_mean"] * area_T
 
-    # Threshold image using Otsu method
-    try:
-        otsu_thresh = filters.threshold_otsu(img)
-    except Exception:
-        # fallback if Otsu fails (e.g. uniform image)
-        otsu_thresh = np.median(img)
-    binary_image = img > otsu_thresh
+    # --- Optional: substructure analysis ---
+    if include_substructure:
+        # Threshold image using Otsu method
+        try:
+            otsu_thresh = filters.threshold_otsu(img)
+        except Exception:
+            otsu_thresh = np.median(img)
 
-    # Mask outside the segmented object: set to False
-    binary_image = np.logical_and(binary_image, mask_bool)
+        binary_image = img > otsu_thresh
+        binary_image = np.logical_and(binary_image, mask_bool)
 
-    # Label connected components in binary image
-    labeled_image, num_speckles = label(binary_image)
+        labeled_image, num_speckles = label(binary_image)
 
-    # Filter out small speckles (< 15 pixels)
-    min_size = 15
-    filtered_speckles = np.zeros_like(labeled_image, dtype=int)
-    current_label = 1
+        min_size = 15
+        filtered_speckles = np.zeros_like(labeled_image, dtype=int)
+        current_label = 1
 
-    for i in range(1, num_speckles + 1):
-        speckle_mask = labeled_image == i
-        if np.sum(speckle_mask) >= min_size:
-            filtered_speckles[speckle_mask] = current_label
-            current_label += 1
+        for i in range(1, num_speckles + 1):
+            speckle_mask = labeled_image == i
+            if np.sum(speckle_mask) >= min_size:
+                filtered_speckles[speckle_mask] = current_label
+                current_label += 1
 
-    # Collect speckle sizes and intensities
-    remaining_labels = np.unique(filtered_speckles)
-    remaining_labels = remaining_labels[remaining_labels != 0]  # exclude background
+        remaining_labels = np.unique(filtered_speckles)
+        remaining_labels = remaining_labels[remaining_labels != 0]
 
-    speckle_sizes = []
-    speckle_intensities = []
+        speckle_sizes = []
+        speckle_intensities = []
 
-    for label_id in remaining_labels:
-        speckle_mask = filtered_speckles == label_id
-        speckle_sizes.append(np.sum(speckle_mask))
-        speckle_intensities.append(np.mean(img[speckle_mask]))
+        for label_id in remaining_labels:
+            speckle_mask = filtered_speckles == label_id
+            speckle_sizes.append(int(np.sum(speckle_mask)))
+            speckle_intensities.append(float(np.mean(img[speckle_mask])))
 
-    # Store substructure features, fallback 0 if empty
-    row_data[f"{staining}_substructures_size"] = np.mean(speckle_sizes) if speckle_sizes else 0
-    row_data[f"{staining}_substructures_intensity"] = np.mean(speckle_intensities) if speckle_intensities else 0
-    row_data[f"{staining}_substructures_count"] = len(speckle_sizes)
+        row_data[f"{staining}_substructures_size"] = float(np.mean(speckle_sizes)) if speckle_sizes else 0
+        row_data[f"{staining}_substructures_intensity"] = float(np.mean(speckle_intensities)) if speckle_intensities else 0
+        row_data[f"{staining}_substructures_count"] = int(len(speckle_sizes))
 
     return row_data
+
 
 
 
@@ -1233,12 +1241,30 @@ def normalize_thresholds(thresholds):
 
 
 
-def morphology_features(mask, row_data, OID, spacing, sigma_skeleton, radius_multiplier):
-    row_data = shape_calc_mask(mask, row_data, OID, spacing)
+def morphology_features(
+    mask,
+    row_data,
+    OID,
+    spacing,
+    sigma_skeleton,
+    radius_multiplier,
+    include_moments: bool = True,
+    include_skeleton: bool = True,
+):
+    row_data = shape_calc_mask(mask, row_data, OID, spacing, include_moments=include_moments)
     row_data = convex_hull_features(mask, row_data, OID, spacing, min_area_fraction=0.005)
     row_data = get_border_fraction(mask, row_data, OID)
-    row_data = skeleton_feats({"Mask": mask}, row_data, OID, spacing, sigma_skeleton, radius_multiplier)
+
+    if include_skeleton:
+        row_data = skeleton_feats({"Mask": mask}, row_data, OID, spacing, sigma_skeleton, radius_multiplier)
+    else:
+        # Ensure skeleton-derived features are absent
+        row_data.pop("crypt_count", None)
+        row_data.pop("crypt_length_total", None)
+        row_data.pop("crypt_length_max", None)
+
     return row_data
+
 
 
 
@@ -1252,8 +1278,12 @@ def intensity_features_for_round(
     spacing: float,
     OID: str,
     sigma: float = 3,
+    include_thresholded: bool = True,
+    include_substructure: bool = True,
+    include_moments: bool = True,
 ):
-    """Compute intensity features for a single round.
+    """
+    Compute intensity features for a single round.
 
     Returns
     -------
@@ -1270,7 +1300,6 @@ def intensity_features_for_round(
 
     for ch_idx, stain in enumerate(stain_names):
         if ch_idx >= img_stack.shape[0]:
-            # channel missing in this round
             continue
 
         staining_key = f"R{int(round_id)}__{stain}"
@@ -1281,26 +1310,50 @@ def intensity_features_for_round(
         img_proc = filters.gaussian(img, sigma=sigma, preserve_range=True)
         img_proc[~mask_bool] = 0
 
-        # Threshold mask for this stain/round
+        # Threshold mask for this stain/round (only used if thresholded features requested)
         thr = thresholds_round.get(stain, 0)
         mask_channel = (img_proc > thr) & mask_bool
 
-        # Provide images in the same structure expected by existing funcs
-        images = {
-            "Mask": mask,
-            "C01": img,
-            "C01_Mask": mask_channel.astype(bool),
-        }
+        # Threshold-derived geometry features (area_T, asymmetry, etc.)
+        if include_thresholded:
+            row_data_round = channel_mask_feat_calc(
+                mask,
+                mask_channel.astype(bool),
+                staining_key,
+                row_data_round,
+                OID=OID,
+                spacing=spacing,
+            )
 
-        # Compute features (use real pixel spacing)
-        row_data_round = channel_mask_feat_calc(mask, images["C01_Mask"], staining_key, row_data_round, OID=OID, spacing=spacing)
-        row_data_round = intensity_feat_calc(img, mask, images["C01_Mask"], row_data_round, staining_key, OID=OID, quantiles_to_calc=quantiles_to_calc)
-        row_data_round = moments_channel_mask(mask, img, row_data_round, OID=OID, staining=staining_key, spacing=spacing)
+        # Intensity features
+        row_data_round = intensity_feat_calc(
+            img,
+            mask,
+            mask_channel.astype(bool),
+            row_data_round,
+            staining_key,
+            OID=OID,
+            quantiles_to_calc=quantiles_to_calc,
+            include_thresholded=include_thresholded,
+            include_substructure=include_substructure,
+        )
 
-        # Pearson vectors (raw intensities within mask)
+        # Channel moments (moments_weighted)
+        if include_moments:
+            row_data_round = moments_channel_mask(
+                mask,
+                img,
+                row_data_round,
+                OID=OID,
+                staining=staining_key,
+                spacing=spacing,
+            )
+
+        # Pearson vectors (raw intensities within mask) – keep regardless of flags
         vectors[staining_key] = img[mask_bool]
 
     return row_data_round, vectors
+
 
 
 
@@ -1587,7 +1640,11 @@ def extract_features_multicycle(
     segmentation_round: int = 0,
     sigma_intensity: float = 3,
     compute_cross_round_pearson: bool = True,
-):
+    do_moments_features: bool = True,
+    do_skeleton_features: bool = True,
+    do_thresholded_features: bool = True,
+    do_substructure_features: bool = True,
+    ):
     """Extract features with multi-round intensity support."""
 
     thresholds_by_round = normalize_thresholds(thresholds)
@@ -1689,6 +1746,8 @@ def extract_features_multicycle(
                         spacing=pixel_spacing,
                         sigma_skeleton=sigma_skeleton,
                         radius_multiplier=radius_multiplier,
+                        include_moments=do_moments_features,
+                        include_skeleton=do_skeleton_features,
                     )
 
                     # Intensity per round
@@ -1714,15 +1773,18 @@ def extract_features_multicycle(
                         thr_r = thresholds_by_round.get(int(r), {})
 
                         feats_r, vecs_r = intensity_features_for_round(
-                            img_stack=img_r,
-                            mask=mask_for_oid,
-                            stain_names=stains_r,
-                            thresholds_round=thr_r,
-                            quantiles_to_calc=quantiles_to_calc,
-                            round_id=int(r),
-                            spacing=pixel_spacing,
-                            OID=OID,
-                            sigma=sigma_intensity,
+                        img_stack=img_r,
+                        mask=mask_for_oid,
+                        stain_names=stains_r,
+                        thresholds_round=thr_r,
+                        quantiles_to_calc=quantiles_to_calc,
+                        round_id=int(r),
+                        spacing=pixel_spacing,
+                        OID=OID,
+                        sigma=sigma_intensity,
+                        include_thresholded=do_thresholded_features,
+                        include_substructure=do_substructure_features,
+                        include_moments=do_moments_features,
                         )
 
                         row_data.update(feats_r)
