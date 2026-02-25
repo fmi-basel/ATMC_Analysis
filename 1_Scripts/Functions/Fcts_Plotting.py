@@ -3,11 +3,12 @@ from __future__ import annotations
 from Functions.Fcts_Base import load_img_mask_by_UID, save_fig
 from matplotlib.patches import Rectangle
 import matplotlib.pyplot as plt
+import matplotlib as mpl
 import pandas as pd
 import numpy as np
 import random
 
-def segmentation_fidelity_check(ome_zarrs_dict, channels, channel_colors, channel_ranges, n, label_name, scalebar_micrometer = 100, pyramid_lvl_plot=4):
+def segmentation_fidelity_check(ome_zarrs_dict, channel, channel_color, channel_range, n, label_name, alpha, pyramid_lvl_plot=4):
     """
     Plot randomly selected images and their corresponding masks from OME-ZARR files.
 
@@ -29,19 +30,34 @@ def segmentation_fidelity_check(ome_zarrs_dict, channels, channel_colors, channe
 
         # Loop over wells
         for well in wells:
+            _, ax = plt.subplots(figsize=(15, 15))
+            ax.set_title(f"{barcode} - {well}", pad=10)
 
-            ome_zarrs_dict[barcode][wells_in_bc.index(well)].plot(
-                label_name=label_name, 
-                pyramid_level=pyramid_lvl_plot, 
-                channels=channels, 
-                channel_colors=channel_colors, 
-                channel_ranges=channel_ranges,
-                fig_width_inch=15, 
-                fig_height_inch=15,
-                scalebar_micrometer = scalebar_micrometer,
-                show_scalebar_label=True,
-                title=f"{barcode} - {well}",
-            )
+            img, label = ome_zarrs_dict[barcode][wells_in_bc.index(well)].get_array_pair_by_coordinate(
+                    label_name=label_name,
+                    pyramid_level=pyramid_lvl_plot,
+                )
+            img = img[channel][0]
+            label = label[label_name][0]
+
+            ax.imshow(img, vmin = channel_range[0], vmax = channel_range[1], cmap = channel_color, interpolation="nearest")
+
+            n_max = int(np.max(label))
+            if n_max == 0:
+                ax.set_axis_off()
+                return
+
+            rng = np.random.default_rng()
+            colors = rng.random((n_max + 1, 4))
+            colors[0] = (0, 0, 0, 0)
+            colors[1:, 3] = alpha
+            cmap = mpl.colors.ListedColormap(colors)
+
+            lab = np.ma.masked_where(label == 0, label)
+            ax.imshow(lab, cmap=cmap, interpolation="nearest")
+            ax.set_axis_off()
+            plt.show()
+
 
 
 def plot_well(ome_zarrs_dict, barcode, well, channels, channel_colors, channel_ranges, label_name, pyramid_lvl_plot=4):
