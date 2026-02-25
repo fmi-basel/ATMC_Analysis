@@ -4,7 +4,7 @@ warnings.filterwarnings("ignore", message="ignoring keyword argument 'read_only'
 warnings.filterwarnings("ignore", category=UserWarning)
 warnings.filterwarnings("ignore", message=".*The 'nopython' keyword.*")
 
-from skimage import filters, measure, morphology
+from skimage import filters, measure, morphology, segmentation
 from natsort import natsorted
 from skan import Skeleton, summarize
 from IPython.display import display
@@ -1066,26 +1066,16 @@ def intensity_feat_calc(
 
     # --- Optional: substructure analysis ---
     if include_substructure:
-        # Threshold image using Otsu method
-        try:
-            otsu_thresh = filters.threshold_otsu(img)
-        except Exception:
-            otsu_thresh = np.median(img)
 
-        binary_image = img > otsu_thresh
-        binary_image = np.logical_and(binary_image, mask_bool)
+        labeled_image, num_speckles = label(img_masked)
 
-        labeled_image, num_speckles = label(binary_image)
-
-        min_size = 15
         filtered_speckles = np.zeros_like(labeled_image, dtype=int)
         current_label = 1
 
         for i in range(1, num_speckles + 1):
             speckle_mask = labeled_image == i
-            if np.sum(speckle_mask) >= min_size:
-                filtered_speckles[speckle_mask] = current_label
-                current_label += 1
+            filtered_speckles[speckle_mask] = current_label
+            current_label += 1
 
         remaining_labels = np.unique(filtered_speckles)
         remaining_labels = remaining_labels[remaining_labels != 0]
@@ -1604,6 +1594,21 @@ def plot_thresholds_multicycle(
                     lower_right_yx=(lr_y, lr_x),
                 )
                 img = img[ch, 0]
+
+                _, mask0 = img_seg.get_array_pair_by_coordinate(
+                    label_name=label_name,
+                    pyramid_level=pyramid_level,
+                    upper_left_yx=(ul_y, ul_x),
+                    lower_right_yx=(lr_y, lr_x),
+                )
+
+                mask_arr = mask0[label_name][0]
+                mask_for_oid = (mask_arr == int(idx) + 1).astype(mask_arr.dtype).astype(bool)
+                img[~mask_for_oid] = 0
+
+                boundary = segmentation.find_boundaries(mask_for_oid, mode="outer")
+                img[boundary] = np.max(img)
+
             except Exception:
                 img = np.zeros((200, 200))
 
