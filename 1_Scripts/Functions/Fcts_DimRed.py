@@ -907,7 +907,7 @@ def compute_phenograph(
         if not np.isfinite(M).all():
             raise ValueError("PCA input contains non-finite values.")
         # Run Scanpy PCA on a temporary AnnData to avoid mutating existing objects
-        _tmp = AnnData(X=M)
+        _tmp = anndata.AnnData(X=M)
         sc.pp.pca(_tmp, n_comps=2, random_state=random_state, copy=False)
         coords = _tmp.obsm["X_pca"][:, :2]
         coords_name = "PCA(2) on clustering matrix"
@@ -1368,7 +1368,7 @@ def knn_label_transfer(
     y_train = adata_ref.obs[label_key].to_numpy()
 
     # Helper to get a 2D numpy array from AnnData according to the chosen representation
-    def _get_matrix(a: AnnData) -> np.ndarray:
+    def _get_matrix(a: anndata.AnnData) -> np.ndarray:
         if obsm_key is not None:
             if obsm_key not in a.obsm:
                 raise ValueError(f"obsm_key '{obsm_key}' not found in a.obsm.")

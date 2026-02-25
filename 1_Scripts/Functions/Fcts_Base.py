@@ -185,10 +185,7 @@ def load_img_mask_by_UID(UID, ome_zarr_dict, table_name, label_name, pyramid_lev
 
     # UID format: 'barcode-well-index'
     try:
-        index_str = UID.split('-')[-1]
-        bc = "-".join(UID.split('-')[:-2])
-        well = UID.split('-')[-2]
-
+        bc, well, index_str = UID.rsplit("-", 2)   # split from right into 3 parts
         index = int(index_str)
 
     except Exception as e:

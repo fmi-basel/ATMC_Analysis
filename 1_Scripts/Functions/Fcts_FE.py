@@ -1447,9 +1447,8 @@ def estimate_staining_thresholds_multicycle(
     for stain, uids in dict_org_lst.items():
         for UID in uids:
             # Parse UID
-            idx = int(UID.split("-")[-1])
-            bc = "-".join(UID.split("-")[:-2])
-            well = UID.split("-")[-2]
+            bc, well, index_str = UID.rsplit("-", 2)   # split from right into 3 parts
+            idx = int(index_str)
 
             plate = ome_zarr_dict[bc]
             if bc not in maps_by_barcode:
@@ -1563,10 +1562,9 @@ def plot_thresholds_multicycle(
                 continue
 
             UID = random.sample(uids, 1)[0]
-            idx = int(UID.split("-")[-1])
-            bc = "-".join(UID.split("-")[:-2])
-            well = UID.split("-")[-2]
-
+            bc, well, index_str = UID.rsplit("-", 2)   # split from right into 3 parts
+            idx = int(index_str)
+            
             plate = ome_zarr_dict[bc]
             if bc not in maps_by_barcode:
                 maps_by_barcode[bc] = build_well_round_map_multi(plate, rounds=rounds_needed)
