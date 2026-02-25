@@ -13,13 +13,13 @@ QUALITY CONTROL FUNCTIONS
 
 
 def calculate_outgrowth(ad, n_seeded):
-    """"""
+    """
     Calculate outgrowth efficiency for each well.
 
     Parameters:
     - ad (anndata.AnnData): AnnData object containing organoid data.
     - n_seeded (int): Number of cells seeded per well (assumed constant).
-    """"""
+    """
     import pandas as pd
 
     experiment_setup = ad.uns["experiment_setup"]
@@ -61,12 +61,12 @@ def calculate_outgrowth(ad, n_seeded):
 
 
 def build_heatmap_df(plate_size):
-    """"""
+    """
     Build an empty DataFrame for heatmap plotting based on the plate size.
 
     Parameters:
     - plate_size (int): Size of the plate (96 or 384).
-    """"""
+    """
 
     if plate_size == 384:
         index_lst = ["A", "B" , "C", "D", "E", "F", "G", "H", "I", "J", "K" , "L" , "M" , "N" , "O", "P"]
@@ -91,14 +91,14 @@ def build_heatmap_df(plate_size):
 
 
 def plate_bias_overview(plt_features, ad, plate_size):
-    """"""
+    """
     Generate heatmaps illustrating plate bias based on specified features and experimental conditions.
 
     Parameters:
     - plt_features (list): List of features for heatmap plotting.
     - ad (anndata.AnnData): AnnData object containing organoid data.
     - plate_size (int): Size of the plate (96 or 384).
-    """"""
+    """
 
     for feat in plt_features:
 
@@ -193,7 +193,7 @@ def plate_bias_overview(plt_features, ad, plate_size):
 
 
 def normalize_groups(adata, group_by, control=None):
-    """"""
+    """
     Normalize data in an AnnData object by groups, applying log1p transformation
     to area-associated features, and then creating separate layers for robust scaling,
     z-normalization and min-max scaling.
@@ -204,7 +204,7 @@ def normalize_groups(adata, group_by, control=None):
     control (dict, optional): A dictionary specifying the control group for normalization.
         The key is the column name, and the value is the control group value.
         If None, each group is normalized independently.
-    """"""
+    """
 
     if isinstance(group_by, str):
         group_by = [group_by]
@@ -307,12 +307,12 @@ import seaborn as sns
 
 
 def build_heatmap_df(plate_size):
-    """"""
+    """
     Build an empty dataframe representing the plate layout for heatmap visualization.
 
     Parameters:
     - plate_size (int): Plate size, either 96 or 384.
-    """"""
+    """
     if plate_size == 384:
         rows = list("ABCDEFGHIJKLMNOP")
         cols = [f"{i:02d}" for i in range(1, 25)]
@@ -325,7 +325,7 @@ def build_heatmap_df(plate_size):
 
 
 def plot_heatmap_with_means(data_df, title, ax=None):
-    """"""
+    """
     Plot plate layout heatmap with extra row and column showing means per row and per column.
     Adds a closed rectangular border around the entire heatmap.
 
@@ -333,7 +333,7 @@ def plot_heatmap_with_means(data_df, title, ax=None):
     - data_df: pd.DataFrame formatted with rows and columns matching plate layout
     - title: str, title for the heatmap
     - ax: matplotlib Axes or None
-    """"""
+    """
     import numpy as np
     import seaborn as sns
     import matplotlib.pyplot as plt
@@ -392,7 +392,7 @@ def plate_bias_overview(
     control_condition=None,
     control_only=False,
 ):
-    """"""
+    """
     Generate plate-layout heatmaps per feature and day to visualize spatial bias.
     Optionally filter to only plot wells matching a specified control condition.
 
@@ -404,7 +404,7 @@ def plate_bias_overview(
         Specifies condition(s) to filter wells for plotting.
     - control_only: bool, default False
         If True, only wells matching control_condition are plotted.
-    """"""
+    """
     def passes_control_condition(obs_row, condition):
         # Check if the observation row satisfies all key-value pairs in condition dict
         return all(obs_row.get(k, None) == v for k, v in condition.items())
@@ -452,23 +452,26 @@ def plate_bias_overview(
 
     # Similarly for Outgrowth plotting, apply the same filtering
     for day in ad.obs["Other"].unique():
+
         df_HM = build_heatmap_df(plate_size)
         df_out = ad.uns.get("Outgrowth_DF")
         if df_out is None:
             print("Outgrowth_DF not found in ad.uns")
             return
-        df_out_day = df_out[df_out.Other == day]
-
+        df_out_day = df_out[df_out.Other == str(day)]
+        
         if control_only:
             if not control_condition:
                 raise ValueError("control_condition must be specified if control_only=True")
             # Filter outgrowth DF by control_condition keys and values
             for k, v in control_condition.items():
                 df_out_day = df_out_day[df_out_day[k] == v]
-
+        
         for cellline in df_out_day.Cell_line.unique():
+
             for medium in df_out_day.Medium.unique():
                 df_plt = df_out_day[(df_out_day.Cell_line == cellline) & (df_out_day.Medium == medium)].copy()
+                print(df_plt)
                 if df_plt.empty:
                     continue
 

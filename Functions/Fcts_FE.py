@@ -5,7 +5,7 @@ warnings.filterwarnings("ignore", category=UserWarning)
 warnings.filterwarnings("ignore", message=".*The 'nopython' keyword.*")
 
 from skimage import filters, measure, morphology
-from natsort import natsorted, natsort_keygen
+from natsort import natsorted
 from skan import Skeleton, summarize
 from IPython.display import display
 import matplotlib.pyplot as plt
@@ -13,6 +13,7 @@ from scipy.ndimage import label
 from tqdm.notebook import tqdm
 import seaborn as sns
 import pandas as pd
+from ez_zarr import ome_zarr
 import numpy as np
 import itertools
 import datetime
@@ -1394,7 +1395,6 @@ def estimate_staining_thresholds_multicycle(
 ):
     """Estimate thresholds for a specific round using segmentation_round ROI table coordinates."""
 
-    import random
     random.seed(seed)
 
     round_id = int(round_id)
@@ -1421,29 +1421,26 @@ def estimate_staining_thresholds_multicycle(
 
     for stain in thresholds:
         ABs_lst = find_staining_in_ABs(stainings, stain)
-
         for day in other:
             barcodes_day = find_barcodes_with_day(experiment_setup, day)
-
             if control_condition is not None:
                 filtered_df = ome_zarr_df[
                     (ome_zarr_df['Barcode'].isin(barcodes_day))
                     & (ome_zarr_df['AB'].isin(ABs_lst))
                     & (ome_zarr_df["Medium"] == control_condition)
+                    & (ome_zarr_df["Day"] == day)
                 ]
             else:
                 filtered_df = ome_zarr_df[
                     (ome_zarr_df['Barcode'].isin(barcodes_day))
                     & (ome_zarr_df['AB'].isin(ABs_lst))
+                    & (ome_zarr_df["Day"] == day)
                 ]
 
             dict_org[stain][day] = list(filtered_df.UID)
             timepoints_lst = timepoints_lst + [*filtered_df.Day]
-
     # Unique timepoints
-    from natsort import natsorted
     timepoints_lst = natsorted(list(set(timepoints_lst)))
-
     for stain in dict_org.keys():
         lst = []
         for cond in dict_org[stain].keys():
@@ -1667,10 +1664,8 @@ def extract_features_multicycle(
         print(f"Processing barcode: {bc}")
         plate = ome_zarrs_dict[bc]
         m = build_well_round_map_multi(plate, rounds=rounds_needed)
-
         wells_in_exp = experiment_setup[bc]
-        rows = []
-
+        rows = []    
         for well in wells_in_exp.keys():
             print(f"  Processing well: {well}")
             img_seg = m.get((well, segmentation_round))
@@ -1687,17 +1682,81 @@ def extract_features_multicycle(
             pixel_spacing = img_seg.get_scale(pyramid_level=pyramid_level)[-1]
 
             for row_idx, row in enumerate(table.itertuples()):
-                if row_idx < 20:
-                    OID = f"{bc}-{well}-{row_idx}"
-                    print(f"    Processing Organoid_ID: {OID}")
-                    ul_y, ul_x = row.y_micrometer, row.x_micrometer
-                    lr_y = row.y_micrometer + row.len_y_micrometer
-                    lr_x = row.x_micrometer + row.len_x_micrometer
 
-                    # Load segmentation round pair for mask
+                OID = f"{bc}-{well}-{row_idx}"
+                ul_y, ul_x = row.y_micrometer, row.x_micrometer
+                lr_y = row.y_micrometer + row.len_y_micrometer
+                lr_x = row.x_micrometer + row.len_x_micrometer
+
+                # Load segmentation round pair for mask
+                try:
+                    _, mask0 = img_seg.get_array_pair_by_coordinate(
+                        label_name=label_name,
+                        pyramid_level=pyramid_level,
+                        upper_left_yx=(ul_y, ul_x),
+                        lower_right_yx=(lr_y, lr_x),
+                    )
+                except Exception:
+                    continue
+
+                mask_arr = mask0[label_name][0]
+                mask_for_oid = (mask_arr == int(row_idx) + 1).astype(mask_arr.dtype)
+
+                # Skip multi-label ROIs
+                from skimage import measure
+                if np.max(measure.label(mask_for_oid.astype(bool))) != 1:
+                    continue
+
+                row_data = {
+                    "Organoid_ID": OID,
+                    "Barcode": bc,
+                    "Well": well,
+                    "Object": str(row_idx),
+                    "Medium": exp_info[0],
+                    "ABs": exp_info[1],
+                    "Cell_line": exp_info[2],
+                    "Other": exp_info[3],
+                    "PATH": img_seg.get_path(),
+                    "y_micrometer": row.y_micrometer,
+                    "x_micrometer": row.x_micrometer,
+                    "len_y_micrometer": row.len_y_micrometer,
+                    "len_x_micrometer": row.len_x_micrometer,
+                    "centroid_y_micrometer": row.y_micrometer + row.len_y_micrometer / 2.0,
+                    "centroid_x_micrometer": row.x_micrometer + row.len_x_micrometer / 2.0,
+                    "Experiment_ID": experiment_ID,
+                }
+
+                # Add staining columns for each round
+                for r in sorted(rounds_needed):
+                    stains_r = get_stains_for_round(stainings, ab_key, r)
+                    for ch_i, stain in enumerate(stains_r):
+                        row_data[f"Staining_R{r}_Ch{ch_i+1}"] = stain
+
+                # Morphology once (segmentation round)
+                row_data = morphology_features(
+                    mask_for_oid,
+                    row_data,
+                    OID,
+                    spacing=pixel_spacing,
+                    sigma_skeleton=sigma_skeleton,
+                    radius_multiplier=radius_multiplier,
+                    include_moments=do_moments_features,
+                    include_skeleton=do_skeleton_features,
+                )
+
+                # Intensity per round
+                pearson_vectors = {}
+                for r in rounds_to_extract:
+                    img_r_obj = m.get((well, int(r)))
+                    if img_r_obj is None:
+                        continue
+
+                    stains_r = get_stains_for_round(stainings, ab_key, r)
+                    if len(stains_r) == 0:
+                        continue
+
                     try:
-                        _, mask0 = img_seg.get_array_pair_by_coordinate(
-                            label_name=label_name,
+                        img_r = img_r_obj.get_array_by_coordinate(
                             pyramid_level=pyramid_level,
                             upper_left_yx=(ul_y, ul_x),
                             lower_right_yx=(lr_y, lr_x),
@@ -1705,96 +1764,31 @@ def extract_features_multicycle(
                     except Exception:
                         continue
 
-                    mask_arr = mask0[label_name][0]
-                    mask_for_oid = (mask_arr == int(row_idx) + 1).astype(mask_arr.dtype)
+                    thr_r = thresholds_by_round.get(int(r), {})
 
-                    # Skip multi-label ROIs
-                    from skimage import measure
-                    if np.max(measure.label(mask_for_oid.astype(bool))) != 1:
-                        continue
-
-                    row_data = {
-                        "Organoid_ID": OID,
-                        "Barcode": bc,
-                        "Well": well,
-                        "Object": str(row_idx),
-                        "Medium": exp_info[0],
-                        "ABs": exp_info[1],
-                        "Cell_line": exp_info[2],
-                        "Other": exp_info[3],
-                        "PATH": img_seg.get_path(),
-                        "y_micrometer": row.y_micrometer,
-                        "x_micrometer": row.x_micrometer,
-                        "len_y_micrometer": row.len_y_micrometer,
-                        "len_x_micrometer": row.len_x_micrometer,
-                        "centroid_y_micrometer": row.y_micrometer + row.len_y_micrometer / 2.0,
-                        "centroid_x_micrometer": row.x_micrometer + row.len_x_micrometer / 2.0,
-                        "Experiment_ID": experiment_ID,
-                    }
-
-                    # Add staining columns for each round
-                    for r in sorted(rounds_needed):
-                        stains_r = get_stains_for_round(stainings, ab_key, r)
-                        for ch_i, stain in enumerate(stains_r):
-                            row_data[f"Staining_R{r}_Ch{ch_i+1}"] = stain
-
-                    # Morphology once (segmentation round)
-                    row_data = morphology_features(
-                        mask_for_oid,
-                        row_data,
-                        OID,
-                        spacing=pixel_spacing,
-                        sigma_skeleton=sigma_skeleton,
-                        radius_multiplier=radius_multiplier,
-                        include_moments=do_moments_features,
-                        include_skeleton=do_skeleton_features,
+                    feats_r, vecs_r = intensity_features_for_round(
+                    img_stack=img_r,
+                    mask=mask_for_oid,
+                    stain_names=stains_r,
+                    thresholds_round=thr_r,
+                    quantiles_to_calc=quantiles_to_calc,
+                    round_id=int(r),
+                    spacing=pixel_spacing,
+                    OID=OID,
+                    sigma=sigma_intensity,
+                    include_thresholded=do_thresholded_features,
+                    include_substructure=do_substructure_features,
+                    include_moments=do_moments_features,
                     )
 
-                    # Intensity per round
-                    pearson_vectors = {}
-                    for r in rounds_to_extract:
-                        img_r_obj = m.get((well, int(r)))
-                        if img_r_obj is None:
-                            continue
+                    row_data.update(feats_r)
+                    pearson_vectors.update(vecs_r)
 
-                        stains_r = get_stains_for_round(stainings, ab_key, r)
-                        if len(stains_r) == 0:
-                            continue
+                # Pearson across all rounds/channels
+                if compute_cross_round_pearson and len(pearson_vectors) >= 2:
+                    row_data.update(pearson_features_from_vectors(pearson_vectors))
 
-                        try:
-                            img_r = img_r_obj.get_array_by_coordinate(
-                                pyramid_level=pyramid_level,
-                                upper_left_yx=(ul_y, ul_x),
-                                lower_right_yx=(lr_y, lr_x),
-                            )
-                        except Exception:
-                            continue
-
-                        thr_r = thresholds_by_round.get(int(r), {})
-
-                        feats_r, vecs_r = intensity_features_for_round(
-                        img_stack=img_r,
-                        mask=mask_for_oid,
-                        stain_names=stains_r,
-                        thresholds_round=thr_r,
-                        quantiles_to_calc=quantiles_to_calc,
-                        round_id=int(r),
-                        spacing=pixel_spacing,
-                        OID=OID,
-                        sigma=sigma_intensity,
-                        include_thresholded=do_thresholded_features,
-                        include_substructure=do_substructure_features,
-                        include_moments=do_moments_features,
-                        )
-
-                        row_data.update(feats_r)
-                        pearson_vectors.update(vecs_r)
-
-                    # Pearson across all rounds/channels
-                    if compute_cross_round_pearson and len(pearson_vectors) >= 2:
-                        row_data.update(pearson_features_from_vectors(pearson_vectors))
-
-                    rows.append(row_data)
+                rows.append(row_data)
 
         if not rows:
             continue
