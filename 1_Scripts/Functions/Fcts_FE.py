@@ -1066,8 +1066,9 @@ def intensity_feat_calc(
 
     # --- Optional: substructure analysis ---
     if include_substructure:
-
-        labeled_image, num_speckles = label(img_masked)
+        img_speckles = np.copy(img)
+        img_speckles[mask_bool] = 0
+        labeled_image, num_speckles = label(img_speckles)
 
         filtered_speckles = np.zeros_like(labeled_image, dtype=int)
         current_label = 1
