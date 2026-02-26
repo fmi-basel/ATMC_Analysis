@@ -10,17 +10,26 @@ import random
 
 def segmentation_fidelity_check(ome_zarrs_dict, channel, channel_color, channel_range, n, label_name, alpha, pyramid_lvl_plot=4):
     """
-    Plot randomly selected images and their corresponding masks from OME-ZARR files.
+    Plot randomly selected images and their corresponding segmentation masks from OME-Zarr plates.
 
-    Parameters:
-    - ome_zarrs_dict (dict): Dictionary containing OME-ZARR files.
-    - channels (list): List of channels to plot.
-    - channel_colors (list): List of colors for each channel.
-    - channel_ranges (list): List of ranges for each channel.
-    - n (int): Number of images to plot per barcode.
-    - label_name (str): Name of the label to plot.
-    - pyramid_lvl_plot (int): Pyramid level to plot.
+    Parameters
+    ----------
+    ome_zarrs_dict : dict
+    channel : int
+        Index of the image channel to display from the returned `img` array.
+    channel_color : str or matplotlib colormap
+        Colormap used to render the intensity image channel.
+    channel_range : list[int, int]
+    n : int
+        Number of wells to randomly sample and plot per barcode.
+    label_name : str
+        Name/key of the label to retrieve and overlay.
+    alpha : float
+        Opacity (0-1) used for non-zero label regions in the overlay.
+    pyramid_lvl_plot : int, default=4
+        Pyramid level to load for both image and label.
     """
+    
     # Loop over barcodes
     for barcode in ome_zarrs_dict:
         
