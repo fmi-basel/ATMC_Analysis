@@ -1,12 +1,87 @@
 from __future__ import annotations
 
-from Functions.Fcts_Base import load_img_mask_by_UID, save_fig
+from Functions.Fcts_Base import save_fig
 from matplotlib.patches import Rectangle
 import matplotlib.pyplot as plt
 import matplotlib as mpl
 import pandas as pd
 import numpy as np
 import random
+
+def load_img_mask_by_UID(UID, ome_zarr_dict, table_name, label_name, pyramid_level, channel_str):
+    """
+    Retrieve an image and corresponding mask for a specific entry in an OME-Zarr plate dataset,
+    based on a unique identifier (UID) and additional parameters.
+
+    Parameters:
+        UID (str): Unique identifier of the data instance, formatted as 'barcode-well-index'.
+        ome_zarr_dict (dict): Dictionary mapping barcodes to Plate objects, assumed to adhere to an OME-Zarr interface.
+        table_name (str): Name of the table to extract entries from for the well (e.g., 'organoids').
+        label_name (str): Name of the label within the mask to extract (e.g., 'organoid').
+        pyramid_level (int): Pyramid level to extract the image/mask from.
+        channel_str (str): Channel identifier string, e.g., 'R2__DAPI'.
+    """
+    # UID format: 'barcode-well-index'
+    try:
+        bc, well, index_str = UID.rsplit("-", 2)
+        index = int(index_str)
+    except Exception as e:
+        raise ValueError(f"UID format error: {UID} should be 'barcode-well-index'") from e
+
+    if bc not in ome_zarr_dict:
+        raise KeyError(f"Barcode {bc} not found in ome_zarr_dict.")
+    plate = ome_zarr_dict[bc]
+
+    well_names = plate.get_names()
+    if well not in well_names:
+        raise KeyError(f"Well {well} not found in barcode {bc}.")
+    well_idx = well_names.index(well)
+    well_ov = plate.images[well_idx]
+
+    table = well_ov.get_table(table_name)
+    if table.empty:
+        raise ValueError(f"Table {table_name} is empty for well {well} in barcode {bc}.")
+    if index < 0 or index >= len(table):
+        raise IndexError(f"Index {index} out of bounds for table length {len(table)}")
+
+    entry = table.iloc[index]
+    ul_y, ul_x = entry["y_micrometer"], entry["x_micrometer"]
+    lr_y = ul_y + entry["len_y_micrometer"]
+    lr_x = ul_x + entry["len_x_micrometer"]
+
+    # Parse round and marker from channel_str
+    if "__" in channel_str:
+        round_part, marker = channel_str.split("__", 1)
+    else:
+        raise ValueError(f"Channel string '{channel_str}' is not in expected format 'R#__MARKER'")
+
+    # Find the channel index for the requested channel_str
+    channel_names = well_ov.channel_names if hasattr(well_ov, 'channel_names') else []
+    if channel_str not in channel_names:
+        raise ValueError(f"Channel '{channel_str}' not found in available channels: {channel_names}")
+    channel_idx = channel_names.index(channel_str)
+
+    # Always use R0 for mask
+    mask_channel_str = f"R0__{marker}"
+    if mask_channel_str not in channel_names:
+        # fallback: try just 'R0__MASK' if that's the convention
+        mask_channel_str = "R0__MASK"
+    mask_channel_idx = channel_names.index(mask_channel_str) if mask_channel_str in channel_names else 0
+
+    img, mask = well_ov.get_array_pair_by_coordinate(
+        label_name=label_name,
+        pyramid_level=pyramid_level,
+        upper_left_yx=(ul_y, ul_x),
+        lower_right_yx=(lr_y, lr_x)
+    )
+
+    if label_name not in mask:
+        raise KeyError(f"Label {label_name} not found in mask for well {well} in barcode {bc}.")
+
+    img = img[channel_idx, 0]
+    mask = mask[label_name][0]
+    mask[mask != index+1] = 0
+    return img, mask
 
 def segmentation_fidelity_check(ome_zarrs_dict, channel, channel_color, channel_range, n, label_name, alpha, pyramid_lvl_plot=4):
     """
@@ -139,7 +214,7 @@ def plot_random_organoids_per_cluster(
     # ---------- validations ----------
     required_uns = ("ome_zarr_dict", "table_name", "label_name", "pixel_spacing", "stainings")
     for k in required_uns:
-        if k not in ad.uns:
+        if (k not in ad.uns):
             raise ValueError(f"ad.uns must contain '{k}' (missing: {k}).")
     if cluster_key not in ad.obs.columns:
         raise ValueError(f"cluster_key '{cluster_key}' not found in ad.obs.")
@@ -284,7 +359,7 @@ def plot_random_organoids_per_cluster(
     maxH = 0
     maxW = 0
     if normalize_sizes:
-        for ci, cname in enumerate(clusters):
+        for ci, cname in clusters:
             sampled_ids = per_cluster_ids[ci]
             for oid in sampled_ids:
                 ab = ad.obs.loc[oid, "ABs"]

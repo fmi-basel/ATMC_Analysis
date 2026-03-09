@@ -14,7 +14,8 @@ import numpy as np
 import phenograph
 import anndata
 
-from Functions.Fcts_Base import save_fig, load_img_mask_by_UID, remove_uns
+from Functions.Fcts_Base import remove_uns
+from Functions.Fcts_Plotting import save_fig, load_img_mask_by_UID
 
 """
 ***

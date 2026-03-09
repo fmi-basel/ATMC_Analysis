@@ -1,4 +1,4 @@
-from Functions.Fcts_Base import load_img_mask_by_UID
+from Functions.Fcts_Plotting import load_img_mask_by_UID
 import matplotlib.pyplot as plt
 import random
 import math
@@ -175,12 +175,11 @@ def get_deleted_organoids(ad, df_removed, df_filtered, rows, cols, title, featur
     fig.suptitle(title, fontsize=18, y=1.01)
 
     # Flatten axes array for easy indexing even if rows=1 or cols=1
+    import numpy as np
     if rows == 1 and cols == 1:
         axes_flat = [axes]
-    elif rows == 1 or cols == 1:
-        axes_flat = axes.flatten() if hasattr(axes, 'flatten') else axes
     else:
-        axes_flat = axes.flatten()
+        axes_flat = np.array(axes).flatten().tolist()
 
     for i in range(rows * cols):
         if i >= n_display:
@@ -189,7 +188,7 @@ def get_deleted_organoids(ad, df_removed, df_filtered, rows, cols, title, featur
         OID = OIDs[i]
         try:
             img, mask = load_img_mask_by_UID(OID, ad.uns["ome_zarr_dict"], ad.uns["table_name"],
-                                            ad.uns["label_name"], pyramid_level, channel)
+                                            ad.uns["label_name"], pyramid_level, str(channel))
             img = img.copy()
             img[~mask.astype(bool)] = 0
             axes_flat[i].imshow(img, interpolation="nearest", aspect="auto", cmap="magma")
@@ -243,12 +242,11 @@ def plot_random_organoids(ad, df_raw, df, feature, rows=10, cols=10, channel=0, 
     fig.suptitle("Remaining Objects", fontsize=18, y=1.00)
 
     # Flatten axes array for easy iteration regardless of shape
+    import numpy as np
     if rows == 1 and cols == 1:
         axes_flat = [ax]
-    elif rows == 1 or cols == 1:
-        axes_flat = ax.flatten() if hasattr(ax, 'flatten') else ax
     else:
-        axes_flat = ax.flatten()
+        axes_flat = np.array(ax).flatten().tolist()
 
     for i in range(rows * cols):
         if i >= n_to_plot:
@@ -258,7 +256,7 @@ def plot_random_organoids(ad, df_raw, df, feature, rows=10, cols=10, channel=0, 
         OID = removed_OID[i]
         try:
             img, mask = load_img_mask_by_UID(OID, ad.uns["ome_zarr_dict"], ad.uns["table_name"],
-                                            ad.uns["label_name"], pyramid_level, channel)
+                                            ad.uns["label_name"], pyramid_level, str(channel))
             img = img.copy()
             img[mask == 0] = 0
             axes_flat[i].imshow(img, interpolation="nearest", aspect="auto", cmap="magma")

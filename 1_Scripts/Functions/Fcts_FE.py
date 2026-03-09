@@ -25,7 +25,8 @@ import math
 import cv2
 import os
 
-from Functions.Fcts_Base import find_staining_in_ABs, load_img_mask_by_UID, find_barcodes_with_day, save_adata
+from Functions.Fcts_Base import find_staining_in_ABs, find_barcodes_with_day, save_adata
+from Functions.Fcts_Plotting import load_img_mask_by_UID
 
 # Disable pandas performance warnings
 from warnings import simplefilter
@@ -450,7 +451,7 @@ def calculate_endpoint(start_coords, angle_degrees, raw):
         x_current = int(round(x_current))
         y_current = int(round(y_current))
 
-        # Check if the current pixel is non-zero or out of bounds. If so, stop.
+        # Check if the current pixel is within the image bounds and non-zero
         if y_current <= 0 or x_current <= 0 or y_current >= raw.shape[0] or x_current >= raw.shape[1]:
             distance -= 5
             break
@@ -669,7 +670,7 @@ def test_skeletonization(barcodes, ome_zarrs_dict, ome_zarr_df, table_name, labe
         while len(sampled_masks) < n and n_attempts < 5*n:
             mask_candidate = random.choice(masks_lst)
             _, mask_img = load_img_mask_by_UID(mask_candidate, ome_zarrs_dict, table_name, label_name,
-                                               pyramid_level, 0)
+                                               pyramid_level, 'R0__DAPI')
             if np.max(measure.label(mask_img.astype(bool))) == 1:
                 if mask_candidate not in sampled_masks:
                     sampled_masks.append(mask_candidate)
@@ -683,7 +684,7 @@ def test_skeletonization(barcodes, ome_zarrs_dict, ome_zarr_df, table_name, labe
         for i, mask in enumerate(sampled_masks):
             obj_id, well_id = mask.split("-")[-1], mask.split("-")[-2]
             spacing = ome_zarrs_dict[barcode][well_names.index(well_id)].get_scale(pyramid_level)[-1]
-            _, image = load_img_mask_by_UID(mask, ome_zarrs_dict, table_name, label_name, pyramid_level, 0)
+            _, image = load_img_mask_by_UID(mask, ome_zarrs_dict, table_name, label_name, pyramid_level, 'R0__DAPI')
             image = image.astype(np.uint8)
             image[image != 0] = 255
             skeleton, mask_circle, radius, center, crypt_count, crypt_length_total, longest_crypt = \
@@ -1324,7 +1325,7 @@ def intensity_features_for_round(
             mask_channel.astype(bool),
             row_data_round,
             staining_key,
-            OID=OID,
+            OID,
             quantiles_to_calc=quantiles_to_calc,
             include_thresholded=include_thresholded,
             include_substructure=include_substructure,
