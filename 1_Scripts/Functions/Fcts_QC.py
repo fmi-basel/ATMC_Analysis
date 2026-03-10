@@ -471,7 +471,7 @@ def plate_bias_overview(
 
             for medium in df_out_day.Medium.unique():
                 df_plt = df_out_day[(df_out_day.Cell_line == cellline) & (df_out_day.Medium == medium)].copy()
-                print(df_plt)
+
                 if df_plt.empty:
                     continue
 

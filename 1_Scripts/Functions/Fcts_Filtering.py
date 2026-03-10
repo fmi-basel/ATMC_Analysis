@@ -97,7 +97,7 @@ def filter_rows_by_percentile_bounds(
 
 
 
-def filter_organoids_by(ad, df, feature, values, channel, pyramid_level=1):
+def filter_organoids_by(ad, df, feature, values, channel, pyramid_level=1, add_boundary = False):
     """
     Filter organoids based on a specified numerical feature range and visualize the removed organoids.
 
@@ -106,7 +106,7 @@ def filter_organoids_by(ad, df, feature, values, channel, pyramid_level=1):
     - df (pandas.DataFrame): Input DataFrame containing organoid information. Its index should correspond to organoid IDs.
     - feature (str): Name of the numerical feature to filter.
     - values (tuple): Tuple (lower_bound, upper_bound) for filtering bounds.
-    - channel (int): Channel index for image visualization.
+    - channel (str): Channel for image visualization.
     - pyramid_level (int): Pyramid level of images for visualization.
     """
     lower_bound, upper_bound = values
@@ -130,7 +130,7 @@ def filter_organoids_by(ad, df, feature, values, channel, pyramid_level=1):
         rows_lower = 1 if n_lower < 9 else min(4, math.ceil(n_lower / 9))
         cols_lower = min(9, n_lower) if rows_lower == 1 else 9
         fig1 = get_deleted_organoids(ad, df.loc[removed_lower], df_filtered, rows_lower, cols_lower,
-                                    f"Objects with {feature} < {lower_bound}", feature, channel, pyramid_level)
+                                    f"Objects with {feature} < {lower_bound}", feature, channel, pyramid_level, add_boundary=add_boundary)
     else:
         fig1 = None
 
@@ -141,13 +141,13 @@ def filter_organoids_by(ad, df, feature, values, channel, pyramid_level=1):
         rows_upper = 1 if n_upper < 9 else min(4, math.ceil(n_upper / 9))
         cols_upper = min(9, n_upper) if rows_upper == 1 else 9
         fig2 = get_deleted_organoids(ad, df.loc[removed_upper], df_filtered, rows_upper, cols_upper,
-                                    f"Objects with {feature} > {upper_bound}", feature, channel, pyramid_level)
+                                    f"Objects with {feature} > {upper_bound}", feature, channel, pyramid_level, add_boundary=add_boundary)
     else:
         fig2 = None
 
     return df_filtered
 
-def get_deleted_organoids(ad, df_removed, df_filtered, rows, cols, title, feature, channel, pyramid_level):
+def get_deleted_organoids(ad, df_removed, df_filtered, rows, cols, title, feature, channel, pyramid_level, add_boundary):
     """
     Plot organoids that are unique to one DataFrame; used to visualize organoids removed during filtering.
 
@@ -159,7 +159,7 @@ def get_deleted_organoids(ad, df_removed, df_filtered, rows, cols, title, featur
     - cols (int): Number of columns in the plot grid.
     - title (str): Title of the plot.
     - feature (str): Feature name to display in subplot titles.
-    - channel (int): Channel index for image visualization.
+    - channel (str): Channel for image visualization.
     - pyramid_level (int): Pyramid level for visualization.
     """
     
@@ -186,23 +186,23 @@ def get_deleted_organoids(ad, df_removed, df_filtered, rows, cols, title, featur
             axes_flat[i].axis('off')
             continue
         OID = OIDs[i]
-        try:
-            img, mask = load_img_mask_by_UID(OID, ad.uns["ome_zarr_dict"], ad.uns["table_name"],
-                                            ad.uns["label_name"], pyramid_level, str(channel))
-            img = img.copy()
-            img[~mask.astype(bool)] = 0
-            axes_flat[i].imshow(img, interpolation="nearest", aspect="auto", cmap="magma")
-            axes_flat[i].set_title(f"{OID}\n{feature}: {feature_values[i]:.2f}", fontsize=8)
-            axes_flat[i].axis('off')
-        except Exception as e:
-            axes_flat[i].text(0.5, 0.5, f"Failed to load\n{OID}", ha='center', va='center')
-            axes_flat[i].axis('off')
-            print(f"Warning: failed to load image for {OID}: {e}")
+        # try:
+        img, mask = load_img_mask_by_UID(OID, ad.uns["stainings"], ad.uns["experiment_setup"], ad.uns["ome_zarr_dict"], ad.uns["table_name"],
+                                        ad.uns["label_name"], pyramid_level, str(channel), add_boundary=add_boundary)
+        img = img.copy()
+        img[~mask.astype(bool)] = 0
+        axes_flat[i].imshow(img, interpolation="nearest", aspect="auto", cmap="magma")
+        axes_flat[i].set_title(f"{OID}\n{feature}: {feature_values[i]:.2f}", fontsize=8)
+        axes_flat[i].axis('off')
+        # except Exception as e:
+        #     axes_flat[i].text(0.5, 0.5, f"Failed to load\n{OID}", ha='center', va='center')
+        #     axes_flat[i].axis('off')
+        #     print(f"Warning: failed to load image for {OID}: {e}")
 
     plt.tight_layout()
     return fig
 
-def plot_random_organoids(ad, df_raw, df, feature, rows=10, cols=10, channel=0, seed=0, pyramid_level=1):
+def plot_random_organoids(ad, df_raw, df, feature, rows=10, cols=10, channel="R0__DAPI", seed=0, pyramid_level=1, add_boundary=False):
     """
     Plot random organoids surviving after filtering from the DataFrame.
 
@@ -213,6 +213,7 @@ def plot_random_organoids(ad, df_raw, df, feature, rows=10, cols=10, channel=0, 
     - feature (str): Feature to display in subplot titles.
     - rows (int): Number of rows in subplot grid.
     - cols (int): Number of columns in subplot grid.
+    - channel (str: Channel for image visualization.
     - seed (int): Random seed for reproducibility.
     - pyramid_level (int): Pyramid level for image loading.
     """
@@ -255,8 +256,8 @@ def plot_random_organoids(ad, df_raw, df, feature, rows=10, cols=10, channel=0, 
             continue
         OID = removed_OID[i]
         try:
-            img, mask = load_img_mask_by_UID(OID, ad.uns["ome_zarr_dict"], ad.uns["table_name"],
-                                            ad.uns["label_name"], pyramid_level, str(channel))
+            img, mask = load_img_mask_by_UID(OID, ad.uns["stainings"], ad.uns["experiment_setup"], ad.uns["ome_zarr_dict"], ad.uns["table_name"],
+                                            ad.uns["label_name"], pyramid_level, str(channel), add_boundary=add_boundary)
             img = img.copy()
             img[mask == 0] = 0
             axes_flat[i].imshow(img, interpolation="nearest", aspect="auto", cmap="magma")

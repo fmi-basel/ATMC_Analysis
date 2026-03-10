@@ -5,6 +5,8 @@ import datetime
 import anndata
 import glob
 import os
+
+
 """
 ***
 BASE FUNCTIONS
@@ -263,7 +265,6 @@ def find_barcodes_with_day(experiment_setup, d_string):
     return found_barcodes   
 
 def extract_ome_zarr_tables(experiment_setup, source, folder, table_name):
-
     """
     Loads OME-Zarr plates for each barcode, extracts tables, and combines them into a single DataFrame.
 
@@ -302,12 +303,25 @@ def extract_ome_zarr_tables(experiment_setup, source, folder, table_name):
         wells = plate.get_names()
         paths = plate.paths
 
+        # Only use wells present in experiment_setup[barcode].keys()
+        valid_wells = set(experiment_setup[barcode].keys())
+        filtered = [
+            (df, well, path)
+            for df, well, path in zip(df_lst, wells, paths)
+            if well in valid_wells
+        ]
+
+        if not filtered:
+            continue
+
+        dfs, wells_filtered, paths_filtered = zip(*filtered)
+
         # Annotate each DataFrame with well and path
-        for df, well, path in zip(df_lst, wells, paths):
+        for df, well, path in zip(dfs, wells_filtered, paths_filtered):
             df['well'] = well
             df['path'] = path
 
-        plate_df = pd.concat(df_lst, ignore_index=False)
+        plate_df = pd.concat(dfs, ignore_index=False)
         plate_df["Barcode"] = barcode
         plate_df["UID"] = barcode + "-" + plate_df["well"].astype(str) + "-" + plate_df.index.astype(str)
 
@@ -436,6 +450,8 @@ def get_stainings(source, sheet="StainingLayout"):
     The returned structure is round-aware if 'Round' exists. Downstream code should handle both.
     """
 
+    from Functions.Fcts_FE import _stringify_dict_keys
+    
     filename = glob.glob(source+'/Layout*.xlsx')[0]
 
     df = pd.read_excel(filename, sheet_name=sheet, header=None)
@@ -506,7 +522,7 @@ def get_stainings(source, sheet="StainingLayout"):
         legacy = {mix: rounds.get(0, []) for mix, rounds in out.items()}
         return legacy
 
-    return out
+    return _stringify_dict_keys(out)
 def get_folder_names(file_path):
     """
     Extracts the names of folders from an absolute path.

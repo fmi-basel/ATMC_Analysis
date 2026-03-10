@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from Functions.Fcts_Base import save_fig
+from Functions.Fcts_Base import save_fig, remove_uns
+from skimage import segmentation
 from matplotlib.patches import Rectangle
 import matplotlib.pyplot as plt
 import matplotlib as mpl
@@ -8,7 +9,7 @@ import pandas as pd
 import numpy as np
 import random
 
-def load_img_mask_by_UID(UID, ome_zarr_dict, table_name, label_name, pyramid_level, channel_str):
+def load_img_mask_by_UID(UID, stainings, experiment_setup, ome_zarr_dict, table_name, label_name, pyramid_level, channel_str, add_boundary=False):
     """
     Retrieve an image and corresponding mask for a specific entry in an OME-Zarr plate dataset,
     based on a unique identifier (UID) and additional parameters.
@@ -20,7 +21,11 @@ def load_img_mask_by_UID(UID, ome_zarr_dict, table_name, label_name, pyramid_lev
         label_name (str): Name of the label within the mask to extract (e.g., 'organoid').
         pyramid_level (int): Pyramid level to extract the image/mask from.
         channel_str (str): Channel identifier string, e.g., 'R2__DAPI'.
+        add_boundary (bool): If True, add the segmentation boundary to the image using a high value.
     """
+
+    from Functions.Fcts_FE import get_plate_for_round
+    
     # UID format: 'barcode-well-index'
     try:
         bc, well, index_str = UID.rsplit("-", 2)
@@ -49,39 +54,54 @@ def load_img_mask_by_UID(UID, ome_zarr_dict, table_name, label_name, pyramid_lev
     lr_y = ul_y + entry["len_y_micrometer"]
     lr_x = ul_x + entry["len_x_micrometer"]
 
-    # Parse round and marker from channel_str
-    if "__" in channel_str:
-        round_part, marker = channel_str.split("__", 1)
-    else:
-        raise ValueError(f"Channel string '{channel_str}' is not in expected format 'R#__MARKER'")
-
-    # Find the channel index for the requested channel_str
-    channel_names = well_ov.channel_names if hasattr(well_ov, 'channel_names') else []
-    if channel_str not in channel_names:
-        raise ValueError(f"Channel '{channel_str}' not found in available channels: {channel_names}")
-    channel_idx = channel_names.index(channel_str)
-
-    # Always use R0 for mask
-    mask_channel_str = f"R0__{marker}"
-    if mask_channel_str not in channel_names:
-        # fallback: try just 'R0__MASK' if that's the convention
-        mask_channel_str = "R0__MASK"
-    mask_channel_idx = channel_names.index(mask_channel_str) if mask_channel_str in channel_names else 0
-
-    img, mask = well_ov.get_array_pair_by_coordinate(
-        label_name=label_name,
-        pyramid_level=pyramid_level,
-        upper_left_yx=(ul_y, ul_x),
-        lower_right_yx=(lr_y, lr_x)
+    _, mask = well_ov.get_array_pair_by_coordinate(
+        label_name = label_name,
+        pyramid_level = pyramid_level,
+        upper_left_yx = (ul_y, ul_x),
+        lower_right_yx = (lr_y, lr_x)
     )
 
     if label_name not in mask:
         raise KeyError(f"Label {label_name} not found in mask for well {well} in barcode {bc}.")
 
+
+    # Parse round and marker from channel_str
+    if "__" in channel_str:
+        round, marker = channel_str.split("__", 1)
+        round = round[1:]  # Remove leading 'R'
+    else:
+        raise ValueError(f"Channel string '{channel_str}' is not in expected format 'R#__MARKER'")
+
+    # Find the channel index for the requested channel_str
+    channel_idx = list(stainings[experiment_setup[bc][well][1]][round]).index(marker)
+
+    # load plate ov for the requested round
+    plate_channel = get_plate_for_round(plate, round)
+    well_names = plate_channel.get_names()
+    if well not in well_names:
+        raise KeyError(f"Well {well} not found in barcode {bc}.")
+    well_idx = well_names.index(well)
+    well_ov_img = plate_channel.images[well_idx]
+
+    img = well_ov_img.get_array_by_coordinate(
+        label_name = None,
+        pyramid_level = pyramid_level,
+        upper_left_yx = (ul_y, ul_x),
+        lower_right_yx = (lr_y, lr_x)
+    )
+
     img = img[channel_idx, 0]
     mask = mask[label_name][0]
-    mask[mask != index+1] = 0
+    mask[mask != int(index) + 1] = 0
+    #img[mask.astype(bool)] = 0
+
+    if add_boundary:
+        boundary = segmentation.find_boundaries(mask.astype(bool), mode="inner")
+        img[boundary] = np.max(img)
+
     return img, mask
+
+
 
 def segmentation_fidelity_check(ome_zarrs_dict, channel, channel_color, channel_range, n, label_name, alpha, pyramid_lvl_plot=4):
     """
@@ -176,7 +196,7 @@ def plot_random_organoids_per_cluster(
     ad,
     cluster_key="kmeans_labels",      # e.g., "kmeans_labels", "phenograph_labels", or with suffixes like "_12"
     n_per_cluster=10,
-    stainings="DAPI",                 # str or list[str], e.g., "DAPI" or ["DAPI","KRT7"]
+    stainings="R0__DAPI",                 # str or list[str], e.g., "R0__DAPI" or ["R0__DAPI","R1__KRT7"]
     pyramid_level=1,
     seed=0,
     cmap="magma",
@@ -193,8 +213,8 @@ def plot_random_organoids_per_cluster(
     # intensity scaling per staining:
     thresholds=None,                  # None or list/tuple of (vmin, vmax) for each staining in order
     # normalization option:
-    normalize_sizes=False,            # If True: pad all images to a common size; only the top-left image gets a scalebar
-    
+    normalize_sizes=False,            # If True, pad all images to a common size; only the top-left image gets a scalebar
+    add_boundary=False,               # If True, overlays the segmentation boundary on the image as np.max(img)
 ):
     """
     Plot n random organoids per cluster using only information in `ad`, with:
@@ -202,14 +222,18 @@ def plot_random_organoids_per_cluster(
       - Scalebar (bar only) whose physical size (µm) is displayed in the figure title.
       - Support for one or multiple stainings; when multiple, render multiple rows per cluster (one row per staining).
       - Optional per-staining intensity thresholds (vmin, vmax) for display.
-      - Optional size normalization: pad all images to the same (H,W) using black pixels; only the top-left image shows the scalebar.
+      - Optional size normalization: pad all images to the maximum (H,W) within the grid so they display uniformly.
+        Only the image in the first row and first column (top-left) will display the scalebar.
 
     Parameters:
         stainings: str or list[str]. If list, a separate row per staining will be plotted within each cluster.
         thresholds: None or list/tuple of (vmin, vmax) per staining, in the same order as 'stainings'.
         normalize_sizes: If True, pad all images to the maximum (H,W) within the grid so they display uniformly.
                          Only the image in the first row and first column (top-left) will display the scalebar.
+        add_boundary: If True, overlays the segmentation boundary on the image as np.max(img).
     """
+    from Functions.Fcts_Base import extract_ome_zarr_tables
+    ad.uns["ome_zarr_dict"], ad.uns["ome_zarr_df"] = extract_ome_zarr_tables(ad.uns["experiment_setup"], ad.uns["source_dir"], ad.uns["folders"], ad.uns["table_name"])
 
     # ---------- validations ----------
     required_uns = ("ome_zarr_dict", "table_name", "label_name", "pixel_spacing", "stainings")
@@ -243,19 +267,6 @@ def plot_random_organoids_per_cluster(
         raise ValueError("ad.uns['pixel_spacing'] must be a positive float.")
     pixel_size_um = base_px_um * (2 ** int(pyramid_level))
 
-    # Build staining -> {AB -> channel_index}
-    stainings_cfg = ad.uns["stainings"]
-    staining_to_ab_channel = {}
-    for st in stainings:
-        ab_to_channel = {}
-        for ab, arr in stainings_cfg.items():
-            arr_list = list(arr)
-            if st in arr_list:
-                ab_to_channel[ab] = arr_list.index(st)
-        if not ab_to_channel:
-            raise ValueError(f"Staining '{st}' not found in any entry of ad.uns['stainings'].")
-        staining_to_ab_channel[st] = ab_to_channel
-
     # All organoids and clusters
     all_ids = ad.obs.index
     if len(all_ids) == 0:
@@ -267,9 +278,27 @@ def plot_random_organoids_per_cluster(
     if not clusters:
         raise ValueError(f"No clusters found under '{cluster_key}'.")
 
-    # Filter to organoids whose AB supports ALL requested stainings
+    # Filter to organoids whose AB supports ALL requested stainings (multiplexed rounds aware)
     def ab_supports_all_stainings(ab_name):
-        return all(ab_name in staining_to_ab_channel[st] for st in stainings)
+        ab_dict = ad.uns["stainings"].get(ab_name, {})
+        for st in stainings:
+            if "__" not in st:
+                return False
+            round_str, marker = st.split("__", 1)
+            round_num = round_str[1:] if round_str.startswith("R") else round_str
+            # Try both string and int keys for round
+            round_keys = list(ab_dict.keys())
+            found_round = None
+            for rk in round_keys:
+                if str(rk) == str(round_num):
+                    found_round = rk
+                    break
+            if found_round is None:
+                return False
+            markers = ab_dict[found_round]
+            if marker not in list(markers):
+                return False
+        return True
 
     rng = np.random.default_rng(seed)
     per_cluster_ids = []
@@ -304,15 +333,15 @@ def plot_random_organoids_per_cluster(
             oid0 = row_ids[0]
             try:
                 st0 = stainings[0]
-                ab0 = ad.obs.loc[oid0, "ABs"]
-                ch0 = staining_to_ab_channel[st0][ab0]
                 img0, _ = load_img_mask_by_UID(
                     oid0,
+                    ad.uns["stainings"], 
+                    ad.uns["experiment_setup"], 
                     ad.uns["ome_zarr_dict"],
                     ad.uns["table_name"],
                     ad.uns["label_name"],
                     pyramid_level,
-                    ch0,
+                    st0,
                 )
                 example_width = img0.shape[1]
                 break
@@ -321,7 +350,6 @@ def plot_random_organoids_per_cluster(
     if example_width is None:
         example_width = 512
     final_bar_um = choose_bar_um(example_width, pixel_size_um, bar_length_um)
-
     # Figure and axes (black background)
     rows = len(clusters) * len(stainings)  # rows per cluster times stainings
     cols = max(1, max_cols)
@@ -359,20 +387,21 @@ def plot_random_organoids_per_cluster(
     maxH = 0
     maxW = 0
     if normalize_sizes:
-        for ci, cname in clusters:
+        for ci, cname in enumerate(clusters):
             sampled_ids = per_cluster_ids[ci]
             for oid in sampled_ids:
-                ab = ad.obs.loc[oid, "ABs"]
                 for st in stainings:
-                    ch = staining_to_ab_channel[st][ab]
                     try:
                         img, mask = load_img_mask_by_UID(
                             oid,
+                            ad.uns["stainings"],
+                            ad.uns["experiment_setup"],
                             ad.uns["ome_zarr_dict"],
                             ad.uns["table_name"],
                             ad.uns["label_name"],
                             pyramid_level,
-                            ch,
+                            st,
+                            add_boundary=add_boundary,
                         )
                         # Apply mask if compatible
                         if mask is not None and mask.shape == img.shape:
@@ -383,10 +412,8 @@ def plot_random_organoids_per_cluster(
                         maxH = max(maxH, H)
                         maxW = max(maxW, W)
                     except Exception as e:
-                        # mark as missing
                         cache[(oid, st)] = (None, None)
                         print(f"Warning: failed to preload image for {oid} ({st}): {e}")
-        # Define a padding function
         def pad_to_max(image, Hmax, Wmax):
             if image is None:
                 return None
@@ -410,50 +437,63 @@ def plot_random_organoids_per_cluster(
 
                 oid = sampled_ids[cidx]
                 ab = ad.obs.loc[oid, "ABs"]
-                if ab not in staining_to_ab_channel[st]:
-                    ax_curr.axis("off")
-                    continue
-                ch = staining_to_ab_channel[st][ab]
 
                 try:
-                    # Load/pick image
                     if normalize_sizes:
                         img, mask = cache.get((oid, st), (None, None))
                         if img is None:
                             raise RuntimeError("missing image in cache")
                         img_disp = pad_to_max(img, maxH, maxW)
-                        img_for_bar = img_disp  # padded size for consistent bar geometry on top-left
+                        img_for_bar = img_disp
                     else:
                         img, mask = load_img_mask_by_UID(
                             oid,
+                            ad.uns["stainings"],
+                            ad.uns["experiment_setup"],
                             ad.uns["ome_zarr_dict"],
                             ad.uns["table_name"],
                             ad.uns["label_name"],
                             pyramid_level,
-                            ch,
+                            st,
+                            add_boundary=add_boundary,
                         )
                         img = img.copy()
                         if mask is not None and mask.shape == img.shape:
                             img[mask == 0] = 0
                         img_disp = img
-                        img_for_bar = img  # individual size
+                        img_for_bar = img
 
-                    # thresholds per staining
                     vmin, vmax = (None, None)
                     if thresholds[si] is not None:
                         vmin, vmax = thresholds[si]
 
                     ax_curr.imshow(img_disp, interpolation="nearest", aspect="auto", cmap=cmap, vmin=vmin, vmax=vmax)
 
-                    # Row titles on first column
+                    # Overlay boundary in plotting function if requested and not already done
+                    if add_boundary and mask is not None and mask.shape == img_disp.shape:
+                        try:
+                            from skimage.segmentation import find_boundaries
+                            boundary = find_boundaries(mask, mode="outer")
+                            # Overlay boundary in white (or max intensity)
+                            img_overlay = ax_curr.images[-1].get_array().copy()
+                            img_overlay[boundary] = np.max(img_overlay) if np.max(img_overlay) > 0 else 1
+                            ax_curr.imshow(img_overlay, interpolation="nearest", aspect="auto", cmap=cmap, vmin=vmin, vmax=vmax, alpha=1.0)
+                        except ImportError:
+                            pass
+
                     if cidx == 0:
                         ax_curr.set_title(f"Cluster {cname} — {st}\n{oid}", fontsize=9, color="white")
                     else:
                         ax_curr.set_title(f"{oid}", fontsize=8, color="white")
 
-                    # Draw scalebar:
-                    # - If normalize_sizes is False: draw on every tile (as before)
-                    # - If normalize_sizes is True: only draw on the global top-left tile (row 0, col 0)
+                    # Remove axis ticks and labels
+                    ax_curr.set_xticks([])
+                    ax_curr.set_yticks([])
+                    ax_curr.set_xlabel("")
+                    ax_curr.set_ylabel("")
+                    ax_curr.tick_params(left=False, bottom=False)
+                    ax_curr.axis("off")
+
                     if not normalize_sizes:
                         draw_scalebar(
                             ax_curr, img_for_bar.shape, pixel_size_um, final_bar_um,
@@ -469,14 +509,13 @@ def plot_random_organoids_per_cluster(
                 except Exception as e:
                     ax_curr.text(0.5, 0.5, f"Failed\n{oid}", ha="center", va="center",
                                  fontsize=8, color="white")
-                    print(f"Warning: failed to load image for {oid} (staining={st}): {e}")
-                ax_curr.axis("off")
+                    ax_curr.axis("off")
 
     fig.tight_layout()
 
     if save_plot:
         save_fig(fig, ad.uns["plot_dir"], "Staining_Gallery", dpi=300)
     
+    ad = remove_uns(ad, keys_to_remove=["ome_zarr_dict", "ome_zarr_df"])
+
     return fig
-
-
