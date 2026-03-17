@@ -91,9 +91,11 @@ def load_img_mask_by_UID(UID, stainings, experiment_setup, ome_zarr_dict, table_
     )
 
     img = img[channel_idx, 0]
+    img = np.pad(img, pad_width=20, mode="constant", constant_values=0)
     mask = mask[label_name][0]
+    mask = np.pad(mask, pad_width=20, mode="constant", constant_values=0)
     mask[mask != int(index) + 1] = 0
-    #img[mask.astype(bool)] = 0
+    img[~mask.astype(bool)] = 0
 
     if add_boundary:
         boundary = segmentation.find_boundaries(mask.astype(bool), mode="inner")
@@ -319,14 +321,6 @@ def plot_random_organoids_per_cluster(
     if total_to_plot == 0:
         raise ValueError("No organoids available to plot after per-cluster sampling for the requested stainings.")
 
-    # Determine bar length for title (auto if None). Estimate width using a probe image.
-    def choose_bar_um(img_width_pixels, px_um, requested_um):
-        if requested_um is not None:
-            return float(requested_um)
-        target_um = (img_width_pixels * px_um) / 5.0
-        nice = np.array([1, 2, 5, 10, 20, 50, 100, 200, 500, 1_000, 2_000, 5_000], dtype=float)
-        return float(nice[(np.abs(nice - target_um)).argmin()])
-
     example_width = None
     for row_ids in per_cluster_ids:
         if row_ids:
@@ -367,20 +361,6 @@ def plot_random_organoids_per_cluster(
         f"{title_prefix} — scalebar: {int(final_bar_um) if final_bar_um >= 10 else final_bar_um:g} µm",
         fontsize=16, y=1.02, color="white"
     )
-
-    # Helper: draw scalebar rectangle
-    def draw_scalebar(ax_, img_shape, px_um, bar_um, color, alpha, pad_frac, height_frac):
-        H, W = img_shape[0], img_shape[1]
-        bar_px = bar_um / px_um
-        if bar_px < 1:
-            return
-        x_pad = pad_frac * W
-        y_pad = pad_frac * H
-        bar_h = max(1, int(height_frac * H))
-        x0 = int(x_pad)
-        y0 = int(H - y_pad - bar_h)
-        rect = Rectangle((x0, y0), width=bar_px, height=bar_h, color=color, alpha=alpha)
-        ax_.add_patch(rect)
 
     # Optional: if normalize_sizes=True, pre-load all images to compute max H and W, and store them to avoid reloading
     cache = {}  # (oid, st) -> (img, mask)
@@ -469,18 +449,6 @@ def plot_random_organoids_per_cluster(
 
                     ax_curr.imshow(img_disp, interpolation="nearest", aspect="auto", cmap=cmap, vmin=vmin, vmax=vmax)
 
-                    # Overlay boundary in plotting function if requested and not already done
-                    if add_boundary and mask is not None and mask.shape == img_disp.shape:
-                        try:
-                            from skimage.segmentation import find_boundaries
-                            boundary = find_boundaries(mask, mode="outer")
-                            # Overlay boundary in white (or max intensity)
-                            img_overlay = ax_curr.images[-1].get_array().copy()
-                            img_overlay[boundary] = np.max(img_overlay) if np.max(img_overlay) > 0 else 1
-                            ax_curr.imshow(img_overlay, interpolation="nearest", aspect="auto", cmap=cmap, vmin=vmin, vmax=vmax, alpha=1.0)
-                        except ImportError:
-                            pass
-
                     if cidx == 0:
                         ax_curr.set_title(f"Cluster {cname} — {st}\n{oid}", fontsize=9, color="white")
                     else:
@@ -519,3 +487,128 @@ def plot_random_organoids_per_cluster(
     ad = remove_uns(ad, keys_to_remove=["ome_zarr_dict", "ome_zarr_df"])
 
     return fig
+
+def choose_bar_um(img_width_pixels, px_um, requested_um):
+    if requested_um is not None:
+        return float(requested_um)
+    target_um = (img_width_pixels * px_um) / 5.0
+    nice = np.array([1, 2, 5, 10, 20, 50, 100, 200, 500, 1_000, 2_000, 5_000], dtype=float)
+    return float(nice[(np.abs(nice - target_um)).argmin()])
+
+# Helper: draw scalebar rectangle
+def draw_scalebar(ax_, img_shape, px_um, bar_um, color, alpha, pad_frac, height_frac):
+    H, W = img_shape[0], img_shape[1]
+    bar_px = bar_um / px_um
+    if bar_px < 1:
+        return
+    x_pad = pad_frac * W
+    y_pad = pad_frac * H
+    bar_h = max(1, int(height_frac * H))
+    x0 = int(x_pad)
+    y0 = int(H - y_pad - bar_h)
+    rect = Rectangle((x0, y0), width=bar_px, height=bar_h, color=color, alpha=alpha)
+    ax_.add_patch(rect)
+
+def pad_to_square(img):
+    h, w = img.shape[:2]
+    if h == w:
+        return img
+
+    size = max(h, w)
+    pad_h = size - h
+    pad_w = size - w
+
+    top = pad_h // 2
+    bottom = pad_h - top
+    left = pad_w // 2
+    right = pad_w - left
+
+    if img.ndim == 2:
+        pad_width = ((top, bottom), (left, right))
+    else:
+        pad_width = ((top, bottom), (left, right), (0, 0))
+
+    return np.pad(img, pad_width, mode="constant", constant_values=0)
+
+
+def plot_all_stainings_per_UID(
+    ad,
+    uids,
+    pyramid_level = 0,
+    scalebar_um = None,
+    add_boundary: bool = False,
+    figsize_per_panel: tuple[float, float] = (4, 4),
+    cmap = "magma",
+    save_plot = False,
+):
+    """
+    Plot all stainings for one UID or a list of UIDs.
+
+    Returns
+    -------
+    dict
+        Nested dict of the form:
+        {uid: {staining: (img, msk)}}
+    """
+    from Functions.Fcts_Base import extract_ome_zarr_tables
+    ad.uns["ome_zarr_dict"], ad.uns["ome_zarr_df"] = extract_ome_zarr_tables(ad.uns["experiment_setup"], ad.uns["source_dir"], ad.uns["folders"], ad.uns["table_name"])
+
+    if isinstance(uids, str):
+        uids = [uids]
+    else:
+        uids = list(uids)
+
+    pixel_size_um = float(ad.uns["pixel_spacing"]) * (2 ** int(pyramid_level))
+
+    for uid in uids:
+        bc, well, _ = uid.rsplit("-", 2)
+        uid_stainings = [f"R{k}__{marker}" for k, markers in ad.uns["stainings"][ad.uns["experiment_setup"][bc][well][1]].items() for marker in markers]
+
+        n = len(uid_stainings)
+        fig, axes = plt.subplots(1, n, figsize=(figsize_per_panel[0] * n, figsize_per_panel[1]))
+        if n == 1:
+            axes = [axes]
+
+        for i, (ax, staining) in enumerate(zip(axes, uid_stainings)):
+            
+            img, _ = load_img_mask_by_UID(
+                uid,
+                ad.uns["stainings"],
+                ad.uns["experiment_setup"],
+                ad.uns["ome_zarr_dict"],
+                ad.uns["table_name"],
+                ad.uns["label_name"],
+                pyramid_level = pyramid_level,
+                channel_str = staining,
+                add_boundary = add_boundary,
+            )
+
+            img = pad_to_square(img)
+            
+            ax.imshow(img, interpolation="nearest", cmap=cmap, vmin = np.percentile(img, 1), vmax = np.percentile(img, 99))
+            ax.set_title(f"{uid}\n{staining}")
+            ax.axis("off")
+
+            if i == 0:
+                final_bar_um = choose_bar_um(img.shape[1], pixel_size_um, scalebar_um)
+
+                print(f"Drawing scalebar of {final_bar_um} µm for UID {uid}")
+
+                draw_scalebar(
+                    ax,
+                    img.shape,
+                    pixel_size_um,
+                    final_bar_um,
+                    color = "white",
+                    alpha = 1,
+                    pad_frac = 0.03,
+                    height_frac = 0.02,
+                )
+
+    
+        fig.tight_layout()
+
+        if save_plot:
+            save_fig(fig, ad.uns["plot_dir"], f"All_Stainings_{uid}", dpi=300)
+
+    ad = remove_uns(ad, keys_to_remove=["ome_zarr_dict", "ome_zarr_df"])

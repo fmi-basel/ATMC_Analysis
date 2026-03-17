@@ -1300,7 +1300,8 @@ def intensity_features_for_round(
         staining_key = f"R{int(round_id)}__{stain}"
 
         img = img_stack[ch_idx, 0]
-
+        img = np.pad(img, pad_width=20, mode="constant", constant_values=0)
+        
         # Smooth and mask
         img_proc = filters.gaussian(img, sigma=sigma, preserve_range=True)
         img_proc[~mask_bool] = 0
@@ -1708,6 +1709,7 @@ def extract_features_multicycle(
                     continue
 
                 mask_arr = mask0[label_name][0]
+                mask_arr  = np.pad(mask_arr, pad_width=20, mode="constant", constant_values=0)
                 mask_for_oid = (mask_arr == int(row_idx) + 1).astype(mask_arr.dtype)
 
                 # Skip multi-label ROIs
@@ -1997,97 +1999,96 @@ def merge_feature_tables_from_zarr(
 
     return ad_all
 
+def merge_feature_tables_from_zarr_rounds(
+    source: str,
+    folder: list[str],
+    experiment_setup: dict,
+    stainings: dict | None,
+    experiment_ID: str,
+    multiplexing_rounds: int | list[int] = 0,
+    result_file_name: str = "1_FeatureLoading",
+    analysis_dir: str | None = None,
+    feature_table_names: str | list[str] = "features",
+    roi_table_name: str = "nuclei_ROI_table",
+    label_name: str = "nuclei",
+    file_ending: str = ".zarr",
+    validate_obs_names: bool = False,
+    save_merged: bool = True,
+    join: str = "outer",
+):
+    """Load one merged AnnData per round, then concatenate rounds along vars.
 
-# def merge_feature_tables_from_zarr_rounds(
-#     source: str,
-#     folder: list[str],
-#     experiment_setup: dict,
-#     stainings: dict | None,
-#     experiment_ID: str,
-#     multiplexing_rounds: int | list[int] = 0,
-#     result_file_name: str = "1_FeatureLoading",
-#     analysis_dir: str | None = None,
-#     feature_table_names: str | list[str] = "features",
-#     roi_table_name: str = "nuclei_ROI_table",
-#     label_name: str = "nuclei",
-#     file_ending: str = ".zarr",
-#     validate_obs_names: bool = False,
-#     save_merged: bool = True,
-#     join: str = "outer",
-# ):
-#     """Load one merged AnnData per round, then concatenate rounds along vars.
+    Default behavior matches 1_FeatureExtraction: keep all objects across rounds and fill missing
+    round-specific features with NaN.
 
-#     Default behavior matches 1_FeatureExtraction: keep all objects across rounds and fill missing
-#     round-specific features with NaN.
+    Parameters
+    ----------
+    join
+        How to combine objects across rounds.
+        - 'outer' (default): union of Organoid_IDs across rounds (missing features become NaN)
+        - 'inner': keep only Organoid_IDs present in all rounds
 
-#     Parameters
-#     ----------
-#     join
-#         How to combine objects across rounds.
-#         - 'outer' (default): union of Organoid_IDs across rounds (missing features become NaN)
-#         - 'inner': keep only Organoid_IDs present in all rounds
+    validate_obs_names
+        When True, requires identical obs_names (only sensible with join='inner').
+    """
 
-#     validate_obs_names
-#         When True, requires identical obs_names (only sensible with join='inner').
-#     """
+    import anndata as ad
 
-#     import anndata as ad
+    if isinstance(multiplexing_rounds, int):
+        rounds = [multiplexing_rounds]
+    else:
+        rounds = list(multiplexing_rounds)
 
-#     if isinstance(multiplexing_rounds, int):
-#         rounds = [multiplexing_rounds]
-#     else:
-#         rounds = list(multiplexing_rounds)
+    if len(rounds) == 0:
+        raise ValueError("multiplexing_rounds is empty. Provide at least one round id.")
 
-#     if len(rounds) == 0:
-#         raise ValueError("multiplexing_rounds is empty. Provide at least one round id.")
+    ad_list = []
+    for r in rounds:
+        ad_r = merge_feature_tables_from_zarr(
+            source=source,
+            folder=folder,
+            experiment_setup=experiment_setup,
+            stainings=stainings,
+            experiment_ID=experiment_ID,
+            result_file_name=result_file_name,
+            analysis_dir=analysis_dir,
+            feature_table_names=feature_table_names,
+            roi_table_name=roi_table_name,
+            label_name=label_name,
+            multiplexing_round=int(r),
+            file_ending=file_ending,
+        )
+        ad_list.append(ad_r)
 
-#     ad_list = []
-#     for r in rounds:
-#         ad_r = merge_feature_tables_from_zarr(
-#             source=source,
-#             folder=folder,
-#             experiment_setup=experiment_setup,
-#             stainings=stainings,
-#             experiment_ID=experiment_ID,
-#             result_file_name=result_file_name,
-#             analysis_dir=analysis_dir,
-#             feature_table_names=feature_table_names,
-#             roi_table_name=roi_table_name,
-#             label_name=label_name,
-#             multiplexing_round=int(r),
-#             file_ending=file_ending,
-#         )
-#         ad_list.append(ad_r)
+    if len(ad_list) == 1:
+        ad_all = ad_list[0]
+    else:
+        if join not in {"inner", "outer"}:
+            raise ValueError("join must be 'inner' or 'outer'")
 
-#     if len(ad_list) == 1:
-#         ad_all = ad_list[0]
-#     else:
-#         if join not in {"inner", "outer"}:
-#             raise ValueError("join must be 'inner' or 'outer'")
+        if join == "inner":
+            common = ad_list[0].obs_names
+            for ad_r in ad_list[1:]:
+                common = common.intersection(ad_r.obs_names)
+            if len(common) == 0:
+                raise ValueError("No overlapping Organoid_IDs across requested rounds. Use join='outer' to keep union.")
+            ad_list = [ad_r[common, :].copy() for ad_r in ad_list]
 
-#         if join == "inner":
-#             common = ad_list[0].obs_names
-#             for ad_r in ad_list[1:]:
-#                 common = common.intersection(ad_r.obs_names)
-#             if len(common) == 0:
-#                 raise ValueError("No overlapping Organoid_IDs across requested rounds. Use join='outer' to keep union.")
-#             ad_list = [ad_r[common, :].copy() for ad_r in ad_list]
+        if validate_obs_names:
+            obs0 = ad_list[0].obs_names
+            for j, ad_r in enumerate(ad_list[1:], start=1):
+                if not obs0.equals(ad_r.obs_names):
+                    raise ValueError(f"obs_names mismatch between rounds {rounds[0]} and {rounds[j]}")
 
-#         if validate_obs_names:
-#             obs0 = ad_list[0].obs_names
-#             for j, ad_r in enumerate(ad_list[1:], start=1):
-#                 if not obs0.equals(ad_r.obs_names):
-#                     raise ValueError(f"obs_names mismatch between rounds {rounds[0]} and {rounds[j]}")
+        # join='outer' unions obs_names and fills missing values with NaN
+        ad_all = ad.concat(ad_list, axis=1, merge="same", join="outer")
 
-#         # join='outer' unions obs_names and fills missing values with NaN
-#         ad_all = ad.concat(ad_list, axis=1, merge="same", join="outer")
+    ad_all.uns = ad_list[0].uns.copy()
+    ad_all.uns["multiplexing_rounds"] = [int(r) for r in rounds]
+    ad_all.uns["round_join"] = join
 
-#     ad_all.uns = ad_list[0].uns.copy()
-#     ad_all.uns["multiplexing_rounds"] = [int(r) for r in rounds]
-#     ad_all.uns["round_join"] = join
+    if save_merged:
+        rtag = "-".join([str(int(r)) for r in rounds])
+        save_adata(ad_all, f"{result_file_name}_merged")
 
-#     if save_merged:
-#         rtag = "-".join([str(int(r)) for r in rounds])
-#         save_adata(ad_all, f"{result_file_name}_merged")
-
-#     return ad_all
+    return ad_all
