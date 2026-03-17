@@ -612,3 +612,99 @@ def plot_all_stainings_per_UID(
             save_fig(fig, ad.uns["plot_dir"], f"All_Stainings_{uid}", dpi=300)
 
     ad = remove_uns(ad, keys_to_remove=["ome_zarr_dict", "ome_zarr_df"])
+
+
+def highlight_UID_in_obsm(
+    ad,
+    UID,
+    highlight_obs = None,
+    dims = (0, 1),
+    base_color = "lightgray",
+    highlight_color = "red",
+    alpha = 0.5,
+    s = 8,
+    highlight_s = 60,
+    label = True,
+    label_offset = (5, 5),
+    figsize = (5, 5),
+    title = None,
+    save_plot = False,
+):
+    """
+    Plot any 2D embedding stored in ad.obsm and highlight selected obs_names.
+    """
+
+    if UID not in ad.obsm:
+        raise ValueError(f"'{UID}' not found in ad.obsm.")
+
+    coords = ad.obsm[UID]
+
+    if coords.shape[1] <= max(dims):
+        raise ValueError(f"'{UID}' has shape {coords.shape}, so dims={dims} is out of range.")
+
+    if highlight_obs is None:
+        highlight_obs = []
+    elif isinstance(highlight_obs, str):
+        highlight_obs = [highlight_obs]
+
+    missing_obs = [x for x in highlight_obs if x not in ad.obs_names]
+    if missing_obs:
+        raise ValueError(f"These obs_names were not found in ad.obs_names: {missing_obs}")
+
+    highlight_mask = ad.obs_names.isin(highlight_obs)
+
+    fig, ax = plt.subplots(figsize=figsize)
+
+    xdim, ydim = dims
+
+    ax.scatter(
+        coords[:, xdim],
+        coords[:, ydim],
+        c=base_color,
+        s=s,
+        alpha=alpha,
+        linewidths=0,
+    )
+
+    if np.any(highlight_mask):
+        ax.scatter(
+            coords[highlight_mask, xdim],
+            coords[highlight_mask, ydim],
+            c=highlight_color,
+            s=highlight_s,
+            alpha=1.0,
+            linewidths=0.5,
+            edgecolors="black",
+            zorder=3,
+        )
+
+        if label:
+            dx, dy = label_offset
+            for obs_name in ad.obs_names[highlight_mask]:
+                idx = ad.obs_names.get_loc(obs_name)
+                x = coords[idx, xdim]
+                y = coords[idx, ydim]
+
+                ax.annotate(
+                    str(obs_name),
+                    xy=(x, y),
+                    xytext=(dx, dy),
+                    textcoords="offset points",
+                    fontsize=8,
+                    color=highlight_color,
+                    ha="left",
+                    va="bottom",
+                    bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="none", alpha=0.8),
+                    arrowprops=dict(arrowstyle="-", color=highlight_color, lw=0.8),
+                    zorder=4,
+                )
+
+    ax.set_xlabel(f"{UID}_{xdim + 1}")
+    ax.set_ylabel(f"{UID}_{ydim + 1}")
+    ax.set_title(title if title is not None else UID)
+    ax.set_axis_off()
+
+    plt.tight_layout()
+
+    if save_plot:
+        save_fig(fig, ad.uns["plot_dir"], f"{UID}_highlight", dpi=300)
