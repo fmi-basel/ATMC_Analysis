@@ -318,8 +318,9 @@ def extract_ome_zarr_tables(experiment_setup, source, folder, table_name):
 
         # Annotate each DataFrame with well and path
         for df, well, path in zip(dfs, wells_filtered, paths_filtered):
-            df['well'] = well
-            df['path'] = path
+            if df is not None:
+                df['well'] = well
+                df['path'] = path
 
         plate_df = pd.concat(dfs, ignore_index=False)
         plate_df["Barcode"] = barcode
@@ -523,6 +524,7 @@ def get_stainings(source, sheet="StainingLayout"):
         return legacy
 
     return _stringify_dict_keys(out)
+
 def get_folder_names(file_path):
     """
     Extracts the names of folders from an absolute path.

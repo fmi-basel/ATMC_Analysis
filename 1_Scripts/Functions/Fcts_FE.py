@@ -1472,7 +1472,7 @@ def estimate_staining_thresholds_multicycle(
                 thresholds[stain][1].append(np.nan)
                 continue
 
-            entry = table.iloc[idx]
+            entry = table.loc[str(idx), :]
             ul_y, ul_x = entry["y_micrometer"], entry["x_micrometer"]
             lr_y = ul_y + entry["len_y_micrometer"]
             lr_x = ul_x + entry["len_x_micrometer"]
@@ -1585,7 +1585,7 @@ def plot_thresholds_multicycle(
                 continue
 
             table = img_seg.get_table(table_name)
-            entry = table.iloc[idx]
+            entry = table.loc[str(idx), :]
             ul_y, ul_x = entry["y_micrometer"], entry["x_micrometer"]
             lr_y = ul_y + entry["len_y_micrometer"]
             lr_x = ul_x + entry["len_x_micrometer"]
@@ -1607,17 +1607,18 @@ def plot_thresholds_multicycle(
                 )
 
                 mask_arr = mask0[label_name][0]
-                mask_for_oid = (mask_arr == int(idx) + 1).astype(mask_arr.dtype).astype(bool)
+                mask_for_oid = (mask_arr == int(idx)).astype(mask_arr.dtype).astype(bool)
                 img[~mask_for_oid] = 0
 
                 boundary = segmentation.find_boundaries(mask_for_oid, mode="outer")
-                img[boundary] = np.max(img)
 
             except Exception:
                 img = np.zeros((200, 200))
 
-            vmin = min(thresholds[stain][2], np.max(img)) if np.max(img) > 0 else 0
-            ax[row, col].imshow(img, vmin=vmin, aspect="auto", cmap="inferno")
+            vmin = thresholds[stain][2]
+            vmax = max(np.percentile(img[mask_for_oid], 99), vmin+1)
+            img[boundary] = max(vmax, img.max())
+            ax[row, col].imshow(img, vmin=vmin, vmax=vmax, aspect="auto", cmap="inferno")
             ax[row, col].set_axis_off()
 
     plt.tight_layout()
@@ -1690,8 +1691,8 @@ def extract_features_multicycle(
 
             pixel_spacing = img_seg.get_scale(pyramid_level=pyramid_level)[-1]
 
-            for row_idx, row in enumerate(table.itertuples()):
-
+            for row in table.itertuples():
+                row_idx = row.Index
                 OID = f"{bc}-{well}-{row_idx}"
                 ul_y, ul_x = row.y_micrometer, row.x_micrometer
                 lr_y = row.y_micrometer + row.len_y_micrometer
@@ -1710,7 +1711,7 @@ def extract_features_multicycle(
 
                 mask_arr = mask0[label_name][0]
                 mask_arr  = np.pad(mask_arr, pad_width=20, mode="constant", constant_values=0)
-                mask_for_oid = (mask_arr == int(row_idx) + 1).astype(mask_arr.dtype)
+                mask_for_oid = (mask_arr == int(row_idx)).astype(mask_arr.dtype)
 
                 # Skip multi-label ROIs
                 from skimage import measure

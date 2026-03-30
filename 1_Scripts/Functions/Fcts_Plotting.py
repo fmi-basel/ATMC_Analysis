@@ -49,7 +49,7 @@ def load_img_mask_by_UID(UID, stainings, experiment_setup, ome_zarr_dict, table_
     if index < 0 or index >= len(table):
         raise IndexError(f"Index {index} out of bounds for table length {len(table)}")
 
-    entry = table.iloc[index]
+    entry = table.loc[str(index), :]
     ul_y, ul_x = entry["y_micrometer"], entry["x_micrometer"]
     lr_y = ul_y + entry["len_y_micrometer"]
     lr_x = ul_x + entry["len_x_micrometer"]
@@ -90,11 +90,12 @@ def load_img_mask_by_UID(UID, stainings, experiment_setup, ome_zarr_dict, table_
         lower_right_yx = (lr_y, lr_x)
     )
 
+
     img = img[channel_idx, 0]
     img = np.pad(img, pad_width=20, mode="constant", constant_values=0)
     mask = mask[label_name][0]
     mask = np.pad(mask, pad_width=20, mode="constant", constant_values=0)
-    mask[mask != int(index) + 1] = 0
+    mask[mask != int(index)] = 0
     img[~mask.astype(bool)] = 0
 
     if add_boundary:
