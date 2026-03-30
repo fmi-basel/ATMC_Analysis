@@ -98,7 +98,7 @@ def save_adata(adata, filename, keys_to_remove = ["ome_zarr_dict", "ome_zarr_df"
     # Find unique save path to avoid overwriting
     while os.path.exists(savepath):
         i += 1
-        savepath = os.path.join(path, f"{filename}{i}.h5ad")
+        savepath = os.path.join(path, f"{filename}-{i}.h5ad")
 
     # Backup keys to remove to restore later
     backup = {}

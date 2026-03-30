@@ -1932,50 +1932,52 @@ def merge_feature_tables_from_zarr(
         meta = experiment_setup[barcode_guess]
 
         for well, path_in_plate in zip(wells, well_paths):
-            ad_list = []
-            for tname in feature_table_names:
-                table_path = os.path.join(plate_path, path_in_plate, "tables", tname)
-                if not os.path.exists(table_path):
-                    raise FileNotFoundError(f"Cannot find table: {table_path}")
-                ad_list.append(_read_table_anndata(table_path))
 
-            obs0 = ad_list[0].obs_names
-            for j, ad_t in enumerate(ad_list[1:], start=1):
-                if ad_t.n_obs != ad_list[0].n_obs:
-                    raise ValueError(
-                        f"n_obs mismatch in well {well} between table {feature_table_names[0]} and {feature_table_names[j]}"
-                    )
-                if not obs0.equals(ad_t.obs_names):
-                    raise ValueError(
-                        f"obs_names order mismatch in well {well} between table {feature_table_names[0]} and {feature_table_names[j]}"
-                    )
+            if well in meta.keys():
+                ad_list = []
+                for tname in feature_table_names:
+                    table_path = os.path.join(plate_path, path_in_plate, "tables", tname)
+                    if not os.path.exists(table_path):
+                        raise FileNotFoundError(f"Cannot find table: {table_path}")
+                    ad_list.append(_read_table_anndata(table_path))
 
-            ad_list_pref = []
-            for tname, ad_t in zip(feature_table_names, ad_list):
-                ad_cp = ad_t.copy()
-                ad_cp.var_names = [f"{tname}__{v}" for v in ad_cp.var_names]
-                ad_list_pref.append(ad_cp)
+                obs0 = ad_list[0].obs_names
+                for j, ad_t in enumerate(ad_list[1:], start=1):
+                    if ad_t.n_obs != ad_list[0].n_obs:
+                        raise ValueError(
+                            f"n_obs mismatch in well {well} between table {feature_table_names[0]} and {feature_table_names[j]}"
+                        )
+                    if not obs0.equals(ad_t.obs_names):
+                        raise ValueError(
+                            f"obs_names order mismatch in well {well} between table {feature_table_names[0]} and {feature_table_names[j]}"
+                        )
 
-            ad_well = ad.concat(ad_list_pref, axis=1, merge="same", join="outer")
-            ad_well = _prefix_vars_with_round(ad_well, multiplexing_round)
+                ad_list_pref = []
+                for tname, ad_t in zip(feature_table_names, ad_list):
+                    ad_cp = ad_t.copy()
+                    ad_cp.var_names = [f"{tname}__{v}" for v in ad_cp.var_names]
+                    ad_list_pref.append(ad_cp)
 
-            ad_well.obs = ad_well.obs.copy()
-            ad_well.obs["Barcode"] = barcode_guess
-            ad_well.obs["Well"] = well
-            ad_well.obs["PATH"] = path_in_plate
-            ad_well.obs["Multiplexing_Round"] = multiplexing_round
+                ad_well = ad.concat(ad_list_pref, axis=1, merge="same", join="outer")
+                ad_well = _prefix_vars_with_round(ad_well, multiplexing_round)
 
-            idx_in_well = pd.Series(range(ad_well.n_obs), index=ad_well.obs_names)
-            ad_well.obs["Organoid_ID"] = barcode_guess + "-" + well + "-" + idx_in_well.astype(str).values
+                ad_well.obs = ad_well.obs.copy()
+                ad_well.obs["Barcode"] = barcode_guess
+                ad_well.obs["Well"] = well
+                ad_well.obs["PATH"] = path_in_plate
+                ad_well.obs["Multiplexing_Round"] = multiplexing_round
 
-            exp_info = meta.get(well, [None, None, None, None])
-            ad_well.obs["Medium"] = exp_info[0]
-            ad_well.obs["ABs"] = exp_info[1]
-            ad_well.obs["Cell_line"] = exp_info[2]
-            ad_well.obs["Other"] = exp_info[3] if len(exp_info) > 3 else None
-            ad_well.obs["Experiment_ID"] = experiment_ID
+                idx_in_well = pd.Series(range(ad_well.n_obs), index=ad_well.obs_names)
+                ad_well.obs["Organoid_ID"] = barcode_guess + "-" + well + "-" + idx_in_well.astype(str).values
 
-            tables_all.append(ad_well)
+                exp_info = meta.get(well, [None, None, None, None])
+                ad_well.obs["Medium"] = exp_info[0]
+                ad_well.obs["ABs"] = exp_info[1]
+                ad_well.obs["Cell_line"] = exp_info[2]
+                ad_well.obs["Other"] = exp_info[3] if len(exp_info) > 3 else None
+                ad_well.obs["Experiment_ID"] = experiment_ID
+
+                tables_all.append(ad_well)
 
     if len(tables_all) == 0:
         raise RuntimeError("No feature tables loaded. Check table names and OME-Zarr structure.")
