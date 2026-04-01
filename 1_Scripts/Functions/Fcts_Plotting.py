@@ -43,7 +43,12 @@ def load_img_mask_by_UID(UID, stainings, experiment_setup, ome_zarr_dict, table_
     well_idx = well_names.index(well)
     well_ov = plate.images[well_idx]
 
-    table = well_ov.get_table(table_name)
+    table = well_ov.get_table(table_name, as_AnnData = True)
+
+    if "label" in table.obs.columns:
+        table.obs_names = table.obs["label"]
+    table = table.to_df()
+    
     if table.empty:
         raise ValueError(f"Table {table_name} is empty for well {well} in barcode {bc}.")
     if index < 0 or index >= len(table):

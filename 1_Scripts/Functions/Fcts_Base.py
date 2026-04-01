@@ -297,7 +297,7 @@ def extract_ome_zarr_tables(experiment_setup, source, folder, table_name):
     for i, barcode in enumerate(experiment_setup):
         plate = ome_zarr.import_plate(os.path.join(source, folder[i]))
         ome_zarr_dict[barcode] = plate
-        df_lst = plate.get_table(table_name)
+        df_lst = plate.get_table(table_name, as_AnnData = True)
 
         # Prepare well and path lists
         wells = plate.get_names()
@@ -317,12 +317,18 @@ def extract_ome_zarr_tables(experiment_setup, source, folder, table_name):
         dfs, wells_filtered, paths_filtered = zip(*filtered)
 
         # Annotate each DataFrame with well and path
-        for df, well, path in zip(dfs, wells_filtered, paths_filtered):
-            if df is not None:
-                df['well'] = well
-                df['path'] = path
+        
+        converted_dfs = []
 
-        plate_df = pd.concat(dfs, ignore_index=False)
+        for df, well, path in zip(dfs, wells_filtered, paths_filtered):
+            if "label" in df.obs.columns:
+                df.obs_names = df.obs["label"]
+            df = df.to_df()
+            df['well'] = well
+            df['path'] = path
+            converted_dfs.append(df)
+
+        plate_df = pd.concat(converted_dfs, ignore_index=False)
         plate_df["Barcode"] = barcode
         plate_df["UID"] = barcode + "-" + plate_df["well"].astype(str) + "-" + plate_df.index.astype(str)
 
@@ -338,106 +344,10 @@ def extract_ome_zarr_tables(experiment_setup, source, folder, table_name):
 
     return ome_zarr_dict, ome_zarr_df
 
-def get_pipetting_info(source, layout_sheet="StainingLayout"):
-    
-    """
-    Extracts and summarizes immunostaining mix preparation instructions from an experiment's
-    layout Excel file. For each antibody mix, it reports which reagents at what volumes
-    should be added into the specified staining solution volume.
-
-    Parameters
-    ----------
-    source : str
-        Path to the folder containing the 'Layout*.xlsx' file.
-    layout_sheet : str, optional
-        Name of the worksheet tab containing the immunostaining table (default: 'StainingLayout').
-    """
-      
-    file = glob.glob(source+'/Layout*.xlsx')[0]
-    
-    df = pd.read_excel(file, sheet_name=layout_sheet, header=None)
-
-    # Find real header row
-    header_row = None
-    for i in range(len(df)):
-        if df.iloc[i, :].astype(str).str.strip().eq("UniqueID").any():
-            header_row = i
-            break
-    if header_row is None:
-        raise RuntimeError("Cannot find immunostaining table in StainingLayout")
-
-    # Parse header (remove trailing blanks)
-    header = [str(x).strip() for x in df.iloc[header_row, :]]
-    last_col = max([i for i,v in enumerate(header) if v and v != 'nan' and v != 'None'] + [0])
-    header = header[:last_col+1]
-
-    # Collect rows below header
-    data = []
-    for i in range(header_row+1, min(header_row + 40, len(df))):
-        row_raw = df.iloc[i, :len(header)].tolist()
-        if all([(str(v).strip() == '' or pd.isna(v)) for v in row_raw]):
-            continue
-        data.append(row_raw)
-    tab = pd.DataFrame(data, columns=header)
-
-    # Clean up: drop blank/Brightfield
-    tab = tab.loc[
-        tab.Target.notna()
-        & tab['Antibody Mix'].notna()
-        & (~tab.Target.astype(str).str.lower().str.contains('brightfield'))
-        & (tab.Target.astype(str).str.strip() != "")
-    ]
-
-    # Find all unique mixes
-    mix_set = set()
-    for mixentry in tab['Antibody Mix']:
-        for m in str(mixentry).split(','):
-            m = m.strip()
-            if m: mix_set.add(m)
-    mixes = sorted(list(mix_set))
-
-    out_lines = []
-    for mix in mixes:
-        sub = tab[tab['Antibody Mix'].astype(str).str.contains(rf'\b{mix}\b', regex=True)]
-        # Get total staining volume for this mix
-        total_vol = None
-        for tv in sub['Total Staining Vol. [µl]']:
-            try:
-                total_vol = float(tv)
-                if total_vol: break
-            except: pass
-
-        ingrs = []
-        for _, row in sub.iterrows():
-            # -------- Add conjugation to target if exists!
-            target = str(row['Target']).strip()
-            conj = str(row['Conjugation']).strip() if 'Conjugation' in row and not pd.isna(row['Conjugation']) else ''
-            if conj and conj != "-":
-                target = f"{target}-{conj}"
-            location = str(row.get('Location', '')).strip()
-            try:
-                dilution = float(row['Dilution'])
-                if not (dilution > 0): continue
-            except Exception:
-                continue
-            ul = total_vol / dilution if total_vol else None
-            if ul:
-                ingrs.append(f"{ul:.2f} ul {target} ({location})")
-        if ingrs and total_vol:
-            s = f"For mix {mix}, add {', '.join(ingrs)} into {total_vol:.0f} ul staining solution."
-            out_lines.append(s)
-
-    for l in out_lines:
-        print(l)
-    return None
 
 def get_stainings(source, sheet="StainingLayout"):
     """
     Extract antibody staining information from an Excel file describing immunostaining layout.
-
-    Supports both:
-    - legacy layouts without 'Round' column (all channels are treated as round 0)
-    - multicycle layouts with a 'Round' column (int or numeric string)
 
     Returns
     -------
@@ -445,41 +355,47 @@ def get_stainings(source, sheet="StainingLayout"):
         Mapping of antibody mix -> either:
         - dict(round -> list of stains by channel) if 'Round' column exists
         - list of stains by channel (legacy)
-
-    Notes
-    -----
-    The returned structure is round-aware if 'Round' exists. Downstream code should handle both.
     """
 
     from Functions.Fcts_FE import _stringify_dict_keys
-    
-    filename = glob.glob(source+'/Layout*.xlsx')[0]
+
+    filename = glob.glob(source + '/Layout*.xlsx')[0]
 
     df = pd.read_excel(filename, sheet_name=sheet, header=None)
-    # Find header row
+
+    # Find header row — anchor on 'UniqueID' (legacy) or 'Target' (new)
     header_row = None
+    anchor_values = {"uniqueid", "target"}
     for i in range(len(df)):
-        if df.iloc[i, :].astype(str).str.strip().eq("UniqueID").any():
+        row_vals = df.iloc[i, :].astype(str).str.strip().str.lower()
+        if row_vals.isin(anchor_values).any():
             header_row = i
             break
     if header_row is None:
         raise RuntimeError("Immunostaining table not found!")
+
     header = [str(x).strip() for x in df.iloc[header_row, :]]
-    last_col = max(i for i,v in enumerate(header) if v and v.lower() != "nan" and v.lower() != "none")
-    header = header[:last_col+1]
+    last_col = max(i for i, v in enumerate(header) if v and v.lower() not in ("nan", "none"))
+    header = header[:last_col + 1]
+
     # Read relevant data rows
     rows = []
-    for i in range(header_row+1, len(df)):
+    for i in range(header_row + 1, len(df)):
         row = df.iloc[i, :len(header)].tolist()
-        if all([pd.isna(x) or str(x).strip() == '' for x in row]):
+        if all(pd.isna(x) or str(x).strip() == '' for x in row):
             continue
         rows.append(row)
     tab = pd.DataFrame(rows, columns=header)
+
     # Filter rows
     tab = tab[tab["Target"].notna() & tab["Antibody Mix"].notna()]
     tab = tab[~tab["Target"].astype(str).str.lower().str.contains("brightfield")]
     tab = tab[tab["Imaging Channel"].notna()]
-    tab = tab[~tab["Type"].astype(str).str.lower().str.contains("secondary")]
+
+    # Exclude secondary antibodies only if 'Type' column exists (legacy layout)
+    if "Type" in tab.columns:
+        tab = tab[~tab["Type"].astype(str).str.lower().str.contains("secondary")]
+
     tab["Imaging Channel"] = tab["Imaging Channel"].astype(str).str.strip()
     tab = tab[tab["Imaging Channel"] != ""]
 
@@ -490,7 +406,7 @@ def get_stainings(source, sheet="StainingLayout"):
     else:
         tab["Round"] = 0
 
-    # Explode mixes: a row can list more than one (e.g 'AB1, AB2')
+    # Explode mixes: a row can list more than one (e.g. 'AB1, AB2')
     mix_rows = []
     for _, row in tab.iterrows():
         mixentries = [m.strip() for m in str(row["Antibody Mix"]).split(",") if m.strip()]
@@ -515,8 +431,6 @@ def get_stainings(source, sheet="StainingLayout"):
     for mix, rounds in out.items():
         rounds_str = ", ".join([f"R{r}({v})" for r, v in sorted(rounds.items())])
         print(f"  {mix}: {rounds_str}")
-
-    get_pipetting_info(source)
 
     # Backward compatibility: if no Round column, collapse to legacy list
     if not has_round:

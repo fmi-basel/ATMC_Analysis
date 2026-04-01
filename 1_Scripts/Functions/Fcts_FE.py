@@ -669,8 +669,10 @@ def test_skeletonization(barcodes, stainings, experiment_setup, ome_zarrs_dict, 
         n_attempts = 0
         while len(sampled_masks) < n and n_attempts < 5*n:
             mask_candidate = random.choice(masks_lst)
+            bc, well, _ = mask_candidate.rsplit("-", 2)
+            staining_dummy = "R0__"+stainings[experiment_setup[bc][well][1]]["0"][0]
             _, mask_img = load_img_mask_by_UID(mask_candidate, stainings, experiment_setup, ome_zarrs_dict, table_name, label_name,
-                                               pyramid_level, 'R0__DAPI')
+                                               pyramid_level, staining_dummy)
             if np.max(measure.label(mask_img.astype(bool))) == 1:
                 if mask_candidate not in sampled_masks:
                     sampled_masks.append(mask_candidate)
@@ -682,10 +684,11 @@ def test_skeletonization(barcodes, stainings, experiment_setup, ome_zarrs_dict, 
         plt.suptitle(barcode, fontsize=20)
 
         for i, mask in enumerate(sampled_masks):
-            _, well_id, obj_id = mask.rsplit("-", 2)
+            bc, well_id, obj_id = mask.rsplit("-", 2)
+            staining_dummy = "R0__"+stainings[experiment_setup[bc][well_id][1]]["0"][0]
             spacing = ome_zarrs_dict[barcode][well_names.index(well_id)].get_scale(pyramid_level)[-1]
             _, image = load_img_mask_by_UID(mask, stainings, experiment_setup, ome_zarrs_dict, table_name, label_name,
-                                               pyramid_level, 'R0__DAPI')
+                                               pyramid_level, staining_dummy)
             image = image.astype(np.uint8)
             image[image != 0] = 255
             skeleton, mask_circle, radius, center, crypt_count, crypt_length_total, longest_crypt = \
@@ -1467,8 +1470,17 @@ def estimate_staining_thresholds_multicycle(
                 thresholds[stain][1].append(np.nan)
                 continue
 
-            table = img_seg.get_table(table_name)
-            if table is None or table.empty or idx >= len(table):
+            table = img_seg.get_table(table_name, as_AnnData = True)
+
+            if table is None:
+                thresholds[stain][1].append(np.nan)
+                continue
+                
+            if "label" in table.obs.columns:
+                table.obs_names = table.obs["label"]
+            table = table.to_df()
+
+            if table.empty or idx >= len(table):
                 thresholds[stain][1].append(np.nan)
                 continue
 
@@ -1584,7 +1596,12 @@ def plot_thresholds_multicycle(
                 ax[row, col].set_axis_off()
                 continue
 
-            table = img_seg.get_table(table_name)
+            table = img_seg.get_table(table_name, as_AnnData = True)
+
+            if "label" in table.obs.columns:
+                table.obs_names = table.obs["label"]
+            table = table.to_df()
+
             entry = table.loc[str(idx), :]
             ul_y, ul_x = entry["y_micrometer"], entry["x_micrometer"]
             lr_y = ul_y + entry["len_y_micrometer"]
@@ -1614,10 +1631,14 @@ def plot_thresholds_multicycle(
 
             except Exception:
                 img = np.zeros((200, 200))
+                mask_for_oid = np.zeros_like(img, dtype=bool)
 
             vmin = thresholds[stain][2]
             vmax = max(np.percentile(img[mask_for_oid], 99), vmin+1)
-            img[boundary] = max(vmax, img.max())
+
+            if np.sum(img) > 0:
+                img[boundary] = max(vmax, img.max())
+
             ax[row, col].imshow(img, vmin=vmin, vmax=vmax, aspect="auto", cmap="inferno")
             ax[row, col].set_axis_off()
 
@@ -1685,8 +1706,16 @@ def extract_features_multicycle(
             exp_info = wells_in_exp[well]
             ab_key = exp_info[1]
 
-            table = img_seg.get_table(table_name)
-            if table is None or table.empty:
+            table = img_seg.get_table(table_name, as_AnnData = True)
+
+            if table is None:
+                continue
+
+            if "label" in table.obs.columns:
+                table.obs_names = table.obs["label"]
+            table = table.to_df()
+
+            if table.empty:
                 continue
 
             pixel_spacing = img_seg.get_scale(pyramid_level=pyramid_level)[-1]
