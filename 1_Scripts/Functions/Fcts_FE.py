@@ -697,7 +697,8 @@ def test_skeletonization(barcodes, stainings, experiment_setup, ome_zarrs_dict, 
             image_plot[skeleton.astype(bool)] = 0
             img_plot = cv2.circle(image_plot, tuple(center), int(radius*radius_multiplier), 0) # Draw max inscribed circle
             img_plot = pad_to_aspect_ratio(img_plot)
-            ax = axarr[0][i] if ncols > 1 else axarr[0]
+            axes = np.atleast_1d(axarr[0])
+            ax = axes[i]
             ax.imshow(img_plot, cmap=plt.cm.gray, aspect="auto")
             ax.set_axis_off()
             ax.set_title(

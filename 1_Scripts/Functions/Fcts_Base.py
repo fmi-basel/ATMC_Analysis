@@ -341,7 +341,7 @@ def extract_ome_zarr_tables(experiment_setup, source, folder, table_name):
         all_plate_dfs.append(plate_df)
 
     ome_zarr_df = pd.concat(all_plate_dfs, ignore_index=True)
-
+    ome_zarr_df.index = ome_zarr_df.UID
     return ome_zarr_dict, ome_zarr_df
 
 

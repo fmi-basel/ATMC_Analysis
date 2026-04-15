@@ -51,7 +51,7 @@ def load_img_mask_by_UID(UID, stainings, experiment_setup, ome_zarr_dict, table_
     
     if table.empty:
         raise ValueError(f"Table {table_name} is empty for well {well} in barcode {bc}.")
-    if index < 0 or index >= len(table):
+    if index < 0 or index > len(table):
         raise IndexError(f"Index {index} out of bounds for table length {len(table)}")
 
     entry = table.loc[str(index), :]
