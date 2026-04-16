@@ -786,7 +786,7 @@ def compute_kmeans(
         labels = km.fit_predict(M)
 
         # store labels
-        key_k = f"{"kmeans_labels"}_{k}"
+        key_k = f'{"kmeans_labels"}_{k}'
         ad.obs[key_k] = pd.Categorical(labels.astype(str))
         last_labels = labels
 
@@ -942,7 +942,7 @@ def compute_phenograph(
         )
 
         labels = np.array(communities, dtype=int)
-        key_k = f"{"phenograph_labels"}_{ki}"
+        key_k = f'{"phenograph_labels"}_{ki}'
         ad.obs[key_k] = pd.Categorical(labels.astype(str))
         last_labels = labels
 
