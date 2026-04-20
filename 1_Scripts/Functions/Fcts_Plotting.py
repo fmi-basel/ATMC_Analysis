@@ -164,9 +164,7 @@ def segmentation_fidelity_check(ome_zarrs_dict, channel, channel_color, channel_
             colors[0] = (0, 0, 0, 0)
             colors[1:, 3] = alpha
             cmap = mpl.colors.ListedColormap(colors)
-
-            lab = np.ma.masked_where(label == 0, label)
-            ax.imshow(lab, cmap=cmap, interpolation="nearest")
+            ax.imshow(label, cmap=cmap, interpolation="nearest")
             ax.set_axis_off()
             plt.show()
 
