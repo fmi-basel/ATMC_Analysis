@@ -204,6 +204,14 @@ def normalize_groups(adata, group_by, control=None):
     control (dict, optional): A dictionary specifying the control group for normalization.
         The key is the column name, and the value is the control group value.
         If None, each group is normalized independently.
+
+    Notes:
+    - Cells with NaN in a feature are ignored when fitting scalers for that feature,
+      but are NOT dropped. Each feature is scaled independently using its own
+      non-NaN control (or group) cells.
+    - NaN values in the output layers remain NaN.
+    - A ValueError is raised if no control cells are found in a group, or if any
+      feature has zero non-NaN control cells.
     """
 
     if isinstance(group_by, str):
@@ -233,7 +241,7 @@ def normalize_groups(adata, group_by, control=None):
     adata.layers["log1p"] = df_log.values
 
     robust_normalized_data = np.full_like(df_log.values, np.nan, dtype=np.float64)
-    z_normalized_data = np.full_like(df_log.values, np.nan, dtype=np.float64)
+    z_normalized_data      = np.full_like(df_log.values, np.nan, dtype=np.float64)
     minmax_normalized_data = np.full_like(df_log.values, np.nan, dtype=np.float64)
 
     if control is not None:
@@ -244,60 +252,140 @@ def normalize_groups(adata, group_by, control=None):
     for group, indices in groups.items():
         int_indices = adata.obs_names.get_indexer(indices)
         group_data = adata.layers["log1p"][int_indices]
+        n_features = group_data.shape[1]
 
-        # Create mask of NaNs to preserve after scaling
-        nan_mask = np.isnan(group_data)
-
-        # Determine data to fit scalers on
+        # Determine which cells to fit scalers on (NaNs handled per-feature below)
         if control is None:
-            fit_data = group_data[~nan_mask.any(axis=1)]  # rows without NaNs
-            if fit_data.shape[0] == 0:
-                # fallback: fill NaNs temporarily with col mean for fitting
-                fill_data = np.nan_to_num(group_data, nan=np.nanmean(np.nan_to_num(group_data, nan=0)))
-                fit_data = fill_data
+            fit_data = group_data
         else:
             subset_obs = adata.obs.loc[indices]
-            control_mask = subset_obs[control_key] == control_value
-            control_indices_within_group = np.where(control_mask)[0]
-            control_data = group_data[control_indices_within_group]
-            control_data_no_nan = control_data[~np.isnan(control_data).any(axis=1)]
-            if control_data_no_nan.shape[0] == 0:
-                fit_data = group_data[~nan_mask.any(axis=1)]
-                if fit_data.shape[0] == 0:
-                    fill_data = np.nan_to_num(group_data, nan=np.nanmean(np.nan_to_num(group_data, nan=0)))
-                    fit_data = fill_data
-            else:
-                fit_data = control_data_no_nan
+            control_mask = (subset_obs[control_key] == control_value).values
+            fit_data = group_data[control_mask]
 
-        # Fit scalers
-        robust_scaler = RobustScaler().fit(fit_data)
-        z_scaler = StandardScaler().fit(fit_data)
-        minmax_scaler = MinMaxScaler().fit(fit_data)
+            if fit_data.shape[0] == 0:
+                raise ValueError(
+                    f"No control cells ('{control_value}') found in group '{group}'. "
+                    f"Cannot fit scalers."
+                )
 
-        # Temporarily impute NaNs for transformation (column medians)
-        group_data_filled = group_data.copy()
-        col_medians = np.nanmedian(group_data_filled, axis=0)
-        inds_nan = np.where(np.isnan(group_data_filled))
-        group_data_filled[inds_nan] = np.take(col_medians, inds_nan[1])
+            # Raise if any feature has zero non-NaN control cells
+            n_valid_per_feature = (~np.isnan(fit_data)).sum(axis=0)
+            missing_features = [
+                adata.var_names[i] for i, n in enumerate(n_valid_per_feature) if n == 0
+            ]
+            if missing_features:
+                raise ValueError(
+                    f"Group '{group}': the following features have NO non-NaN control "
+                    f"cells and cannot be normalized:\n{missing_features}"
+                )
 
-        robust_scaled = robust_scaler.transform(group_data_filled)
-        z_scaled = z_scaler.transform(group_data_filled)
-        minmax_scaled = minmax_scaler.transform(group_data_filled)
+        # --- Per-feature scaler fitting (NaN-aware, no row dropping) ---
+        robust_params = []   # (center, scale)  per feature
+        z_params      = []   # (mean,   std)     per feature
+        minmax_params = []   # (min,    range)   per feature
 
-        # Reapply NaNs to original positions
-        robust_scaled[nan_mask] = np.nan
-        z_scaled[nan_mask] = np.nan
-        minmax_scaled[nan_mask] = np.nan
+        for j in range(n_features):
+            col = fit_data[:, j]
+            valid = col[~np.isnan(col)]
+
+            if valid.shape[0] == 0:
+                # No non-NaN values in this feature for this group — keep NaN in output
+                robust_params.append((np.nan, 1.0))
+                z_params.append((np.nan, 1.0))
+                minmax_params.append((np.nan, 1.0))
+                continue
+
+            # RobustScaler: center = median, scale = IQR
+            center = np.median(valid)
+            q75, q25 = np.percentile(valid, [75, 25])
+            iqr = q75 - q25
+            robust_params.append((center, iqr if iqr != 0 else 1.0))
+
+            # StandardScaler: mean, std
+            mu    = valid.mean()
+            sigma = valid.std()
+            z_params.append((mu, sigma if sigma != 0 else 1.0))
+
+            # MinMaxScaler: min, range
+            vmin, vmax = valid.min(), valid.max()
+            vrange = vmax - vmin
+            minmax_params.append((vmin, vrange if vrange != 0 else 1.0))
+
+        # --- Transform all group cells per-feature, preserving NaNs ---
+        robust_scaled = np.full_like(group_data, np.nan, dtype=np.float64)
+        z_scaled      = np.full_like(group_data, np.nan, dtype=np.float64)
+        minmax_scaled = np.full_like(group_data, np.nan, dtype=np.float64)
+
+        for j in range(n_features):
+            col        = group_data[:, j]
+            valid_mask = ~np.isnan(col)
+
+            r_center, r_scale  = robust_params[j]
+            z_mu,     z_sigma  = z_params[j]
+            mm_min,   mm_range = minmax_params[j]
+
+            if np.isnan(r_center):
+                continue  # feature had no valid fit data — leave as NaN
+
+            robust_scaled[valid_mask, j] = (col[valid_mask] - r_center) / r_scale
+            z_scaled[valid_mask, j]      = (col[valid_mask] - z_mu)     / z_sigma
+            minmax_scaled[valid_mask, j] = (col[valid_mask] - mm_min)   / mm_range
 
         robust_normalized_data[int_indices] = robust_scaled
-        z_normalized_data[int_indices] = z_scaled
+        z_normalized_data[int_indices]      = z_scaled
         minmax_normalized_data[int_indices] = minmax_scaled
 
     adata.layers["robust_scaled"] = robust_normalized_data
-    adata.layers["z_scaled"] = z_normalized_data
+    adata.layers["z_scaled"]      = z_normalized_data
     adata.layers["minmax_scaled"] = minmax_normalized_data
-
+    check_control_normalization(adata, control=control, group_by=group_by)
     return adata
+
+
+def check_control_normalization(adata, control, group_by, tol=0.5):
+    """
+    Sanity check: for the control group, 
+    - z_scaled features should have mean ≈ 0
+    - robust_scaled features should have median ≈ 0
+    
+    Parameters:
+        adata: AnnData object after normalization
+        control: dict, e.g. {"Cell_line": "WT_11"}
+        group_by: str or list of str — same as used in normalize_groups
+        tol: tolerance threshold to flag deviations (default 0.5)
+    """
+    if isinstance(group_by, str):
+        group_by = [group_by]
+
+    control_key, control_value = list(control.items())[0]
+
+    results = {}
+    for layer, metric_name, metric_fn in [
+        ("z_scaled",      "mean",   lambda x: np.nanmean(x, axis=0)),
+        ("robust_scaled", "median", lambda x: np.nanmedian(x, axis=0)),
+    ]:
+        # Check per group_by group
+        for group, indices in adata.obs.groupby(group_by, observed=True).groups.items():
+            int_idx = adata.obs_names.get_indexer(indices)
+            group_obs = adata.obs.loc[indices]
+            ctrl_within_group = group_obs[control_key] == control_value
+            ctrl_int_idx = int_idx[ctrl_within_group.values]
+
+            if len(ctrl_int_idx) == 0:
+                print(f"[{layer}] Group '{group}': no control samples found, skipping.")
+                continue
+
+            data = adata.layers[layer][ctrl_int_idx]
+            stat = metric_fn(data)
+            max_dev = np.nanmax(np.abs(stat))
+            status = "✅ OK" if max_dev < tol else "⚠️  WARNING"
+
+            print(f"[{layer}] Group '{group}' | control '{control_value}' | "
+                  f"max |{metric_name}| = {max_dev:.4f}  {status}")
+
+            results[(layer, str(group))] = {"metric": metric_name, "max_deviation": max_dev}
+
+    return results
 
 
 import numpy as np

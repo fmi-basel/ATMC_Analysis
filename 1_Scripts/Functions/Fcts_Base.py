@@ -171,7 +171,7 @@ def save_after_filtering(df, df_raw, ad_raw, save_dir = None):
     # Save AnnData object
     save_adata(ad, "2_FeaturesFiltered")
 
-def find_zarr_dirs(root_dir, max_depth=None, file_ending=".zarr"):
+def find_zarr_dirs(root_dir, max_depth=None, file_ending=".zarr", analysis_dir = None):
     """
     Finds all OME-Zarr directories within a given root directory,
     stopping at the first depth where any are found.
@@ -181,6 +181,9 @@ def find_zarr_dirs(root_dir, max_depth=None, file_ending=".zarr"):
     - max_depth (int, optional): The maximum depth to search for OME-Zarr directories.
     """
     from collections import deque
+
+    if analysis_dir is None:
+        analysis_dir = root_dir
 
     zarr_dirs = []
     min_depth_found = None
@@ -225,11 +228,8 @@ def find_zarr_dirs(root_dir, max_depth=None, file_ending=".zarr"):
         print("No OME-Zarr directories found. Please check the root directory and depth.")
         return []
     print(f"Found {len(zarr_dirs)} OME-Zarr directories in {root_dir} at depth {min_depth_found}.")
-    print("Directories found. Make sure that variable \033[3mbarcodes\033[0m is in the same order:")
-    for zarr_dir in natsorted(zarr_dirs):
-        print(f"- {zarr_dir}")
 
-    return natsorted(zarr_dirs)
+    return zarr_dirs, analysis_dir
 
 def find_staining_in_ABs(stainings, staining_to_find):
     """Find AB mixes that contain a staining, supporting both legacy and round-aware stainings."""
@@ -321,12 +321,13 @@ def extract_ome_zarr_tables(experiment_setup, source, folder, table_name):
         converted_dfs = []
 
         for df, well, path in zip(dfs, wells_filtered, paths_filtered):
-            if "label" in df.obs.columns:
-                df.obs_names = df.obs["label"]
-            df = df.to_df()
-            df['well'] = well
-            df['path'] = path
-            converted_dfs.append(df)
+            if df is not None:
+                if "label" in df.obs.columns:
+                    df.obs_names = df.obs["label"]
+                df = df.to_df()
+                df['well'] = well
+                df['path'] = path
+                converted_dfs.append(df)
 
         plate_df = pd.concat(converted_dfs, ignore_index=False)
         plate_df["Barcode"] = barcode

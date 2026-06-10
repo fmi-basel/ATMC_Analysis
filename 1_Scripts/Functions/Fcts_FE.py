@@ -62,7 +62,7 @@ Strategy:
 # NOTE: This file is a direct copy of the former top-level Fcts_FE.py with only import paths updated.
 
 
-def make_experiment(source, layout_sheets = ["MediumLayout", "StainingLayout", "LineLayout", "OtherLayout"]):
+def make_experiment(source, folder, layout_sheets = ["MediumLayout", "StainingLayout", "LineLayout", "OtherLayout"]):
     """
     Parses an experiment's plate layout Excel file and returns a nested dictionary of well metadata.
 
@@ -196,24 +196,21 @@ def make_experiment(source, layout_sheets = ["MediumLayout", "StainingLayout", "
                     )
                 result[barcode][well] = values
 
-    display_experiment_setup(result)
+    display_experiment_setup(result, folder)
     barcodes = list(result.keys())
     
-    print(f"Found {len(barcodes)} barcodes in experiment setup:")
-    for bc in barcodes:
-        print(bc)
     return result, barcodes
 
 
-def display_experiment_setup(experiment):
+def display_experiment_setup(experiment, folder):
     """
     Display the experiment setup for each barcode.
 
     Parameters:
     - experiment (dict): Experiment setup dictionary.
-    """    
-    # Extract row and col names                         
-    for barcode in experiment.keys():
+    """
+    # Extract row and col names
+    for i, barcode in enumerate(experiment.keys()):
         current_plate = experiment[barcode]
         rows = list(set([x[0] for x in current_plate.keys()]))
 
@@ -227,6 +224,7 @@ def display_experiment_setup(experiment):
         for well in current_plate.keys():
             df_hm.loc[well[0], well[1:]] = current_plate[well]
         print("\n\nPlate-Barcode: %s"%barcode)
+        print("Source folder: %s"%folder[i])
         display(df_hm)
     
     return None
@@ -245,6 +243,35 @@ def threshold_change(threshold, staining, new_threshold):
 
     return threshold
 
+def apply_threshold_changes(thresholds_raw_by_round, thresholds_by_round, thresholds_to_change):
+    """
+    Apply multiple threshold updates from a dict like:
+    {"R0__DAPI": 1000, "R0__KRT7": 500}
+
+    Parameters:
+    - thresholds_raw_by_round (dict): Raw threshold structure by round.
+    - thresholds_by_round (dict): Simplified threshold structure by round.
+    - thresholds_to_change (dict): Mapping of 'R{round}__{staining}' -> new threshold
+
+    Returns:
+    - thresholds_raw_by_round (dict)
+    - thresholds_by_round (dict)
+    """
+    for key, new_threshold in thresholds_to_change.items():
+        round_to_change_str, staining = key.split("__")
+        round_to_change = int(round_to_change_str.replace("R", ""))
+
+        thresholds_raw_by_round[round_to_change] = threshold_change(
+            threshold=thresholds_raw_by_round[round_to_change],
+            staining=staining,
+            new_threshold=new_threshold,
+        )
+
+        thresholds_by_round[round_to_change] = {
+            k: v[2] for k, v in thresholds_raw_by_round[round_to_change].items()
+        }
+
+    return thresholds_raw_by_round, thresholds_by_round
 
 def dict_add_feat(d, feat_name, value):
     """
@@ -1376,6 +1403,67 @@ def pearson_features_from_vectors(vectors: dict[str, np.ndarray]) -> dict:
 
 
 
+def estimate_staining_thresholds_all_rounds(
+    rounds: list[int],
+    ome_zarr_df,
+    ome_zarr_dict,
+    stainings,
+    experiment_setup,
+    table_name,
+    label_name,
+    pyramid_level=0,
+    segmentation_round: int = 0,
+    control_condition=None,
+    n=20,
+    seed=0,
+    sigma=3,
+    q=0.5,
+):
+    """Run threshold estimation across all rounds and aggregate results.
+
+    Wraps `estimate_staining_thresholds_multicycle` for each round in `rounds`
+    and collects results into per-round dictionaries.
+
+    Returns
+    -------
+    thresholds_raw_by_round : dict
+        {round_id: {stain: [channel_idx, raw_values, final_threshold]}}
+    thresholds_by_round : dict
+        {round_id: {stain: final_threshold}}
+    dict_org_by_round : dict
+        {round_id: {stain: {day: [UIDs]}}}
+    timepoints_by_round : dict
+        {round_id: [days]}
+    """
+    thresholds_raw_by_round = {}
+    thresholds_by_round = {}
+    dict_org_by_round = {}
+    timepoints_by_round = {}
+
+    for r in rounds:
+        thr_r, dict_org, timepoints = estimate_staining_thresholds_multicycle(
+            ome_zarr_df=ome_zarr_df,
+            ome_zarr_dict=ome_zarr_dict,
+            stainings=stainings,
+            experiment_setup=experiment_setup,
+            table_name=table_name,
+            label_name=label_name,
+            pyramid_level=pyramid_level,
+            control_condition=control_condition,
+            n=n,
+            seed=seed,
+            sigma=sigma,
+            q=q,
+            round_id=r,
+            segmentation_round=segmentation_round,
+        )
+        thresholds_raw_by_round[r] = thr_r
+        thresholds_by_round[r] = {stain: vals[2] for stain, vals in thr_r.items()}
+        dict_org_by_round[r] = dict_org
+        timepoints_by_round[r] = timepoints
+
+    return thresholds_raw_by_round, thresholds_by_round, dict_org_by_round, timepoints_by_round
+
 def estimate_staining_thresholds_multicycle(
     ome_zarr_df,
     ome_zarr_dict,
@@ -1392,72 +1480,72 @@ def estimate_staining_thresholds_multicycle(
     round_id: int = 0,
     segmentation_round: int = 0,
 ):
-    """Estimate thresholds for a specific round using segmentation_round ROI table coordinates."""
+    """Estimate staining thresholds for a specific round using segmentation_round ROI table coordinates.
 
+    For each staining, randomly samples up to `n` organoids per day from control wells
+    (or all wells if control_condition is None), extracts the bounding-box image crop,
+    applies Gaussian blur, computes the triangle threshold, and returns the q-quantile
+    over all samples as the final threshold.
+
+    Returns
+    -------
+    thresholds : dict
+        {stain: [channel_index, [raw_threshold_values], final_threshold]}
+    dict_org : dict
+        {stain: {day: [UIDs]}}
+    timepoints_lst : list
+        natsorted list of days present in the experiment.
+    """
     random.seed(seed)
-
-    segmentation_round = int(segmentation_round)
     rounds_needed = {round_id, segmentation_round}
-
-    # Build stain list for this round per AB mix and map to channel index
+    print("hi")
+    # Build stain → [channel_idx, raw_values, final_threshold] per AB mix for this round
     thresholds = {}
-    for ab_mix in stainings.keys():
-        stains_r = get_stains_for_round(stainings, ab_mix, round_id)
-        #print(stains_r)
-        for i, stain in enumerate(stains_r):
-            thresholds[stain] = [i + 1, [], 0]
+    for ab_mix in stainings:
+        for i, stain in enumerate(get_stains_for_round(stainings, ab_mix, round_id)):
+            thresholds[stain] = [i + 1, [], np.nan]
 
-    # Extract timepoints from experiment setup (Other)
-    other = []
-    for plate in experiment_setup.keys():
-        for well in experiment_setup[plate].keys():
-            if experiment_setup[plate][well][3] not in other:
-                other.append(experiment_setup[plate][well][3])
+    # Collect unique days from experiment setup (index 3 = OtherLayout value)
+    days = natsorted({
+        experiment_setup[plate][well][3]
+        for plate in experiment_setup
+        for well in experiment_setup[plate]
+    })
 
-    dict_org = {ab: {cond: [] for cond in other} for ab in thresholds.keys()}
-    dict_org_lst = {ab: {} for ab in thresholds.keys()}
-    timepoints_lst = []
+    dict_org = {stain: {day: [] for day in days} for stain in thresholds}
+    dict_org_lst = {stain: [] for stain in thresholds}
 
+    # Populate dict_org: map each stain × day to a list of UIDs
     for stain in thresholds:
-        ABs_lst = find_staining_in_ABs(stainings, stain)
-
-        for day in other:
+        ab_mixes = find_staining_in_ABs(stainings, stain)
+        for day in days:
             barcodes_day = find_barcodes_with_day(experiment_setup, day)
+            mask = (
+                ome_zarr_df["Barcode"].isin(barcodes_day)
+                & ome_zarr_df["AB"].isin(ab_mixes)
+                & (ome_zarr_df["Day"] == day)
+            )
             if control_condition is not None:
-                filtered_df = ome_zarr_df[
-                    (ome_zarr_df['Barcode'].isin(barcodes_day))
-                    & (ome_zarr_df['AB'].isin(ABs_lst))
-                    & (ome_zarr_df["Medium"] == control_condition)
-                    & (ome_zarr_df["Day"] == day)
-                ]
-            else:
-                filtered_df = ome_zarr_df[
-                    (ome_zarr_df['Barcode'].isin(barcodes_day))
-                    & (ome_zarr_df['AB'].isin(ABs_lst))
-                    & (ome_zarr_df["Day"] == day)
-                ]
+                mask &= ome_zarr_df["Medium"] == control_condition
+            dict_org[stain][day] = list(ome_zarr_df.loc[mask, "UID"])
 
-            dict_org[stain][day] = list(filtered_df.UID)
-            timepoints_lst = timepoints_lst + [*filtered_df.Day]
-    # Unique timepoints
-    timepoints_lst = natsorted(list(set(timepoints_lst)))
-    for stain in dict_org.keys():
-        lst = []
-        for cond in dict_org[stain].keys():
-            if n > len(dict_org[stain][cond]):
-                lst = dict_org[stain][cond] + lst
-            else:
-                lst = random.sample(dict_org[stain][cond], n) + lst
-        dict_org_lst[stain] = lst
+    # Randomly sample up to n organoids per day; take all if fewer than n available
+    for stain in thresholds:
+        sampled = []
+        for day in days:
+            pool = dict_org[stain][day]
+            sampled.extend(pool if len(pool) <= n else random.sample(pool, n))
+        dict_org_lst[stain] = sampled
 
-    # Cache well-round maps per barcode (avoids repeated imports)
+    # Cache well-round maps per barcode to avoid repeated imports
     maps_by_barcode: dict[str, dict[tuple[str, int], object]] = {}
 
-    # Compute thresholds
+    # Compute per-organoid triangle thresholds
     for stain, uids in dict_org_lst.items():
-        for UID in uids:
-            # Parse UID
-            bc, well, index_str = UID.rsplit("-", 2)   # split from right into 3 parts
+        ch = thresholds[stain][0] - 1  # 0-based channel index
+
+        for uid in uids:
+            bc, well, index_str = uid.rsplit("-", 2)
             idx = int(index_str)
 
             plate = ome_zarr_dict[bc]
@@ -1471,50 +1559,43 @@ def estimate_staining_thresholds_multicycle(
                 thresholds[stain][1].append(np.nan)
                 continue
 
-            table = img_seg.get_table(table_name, as_AnnData = True)
-
+            table = img_seg.get_table(table_name, as_AnnData=True)
             if table is None:
                 thresholds[stain][1].append(np.nan)
                 continue
-                
+
             if "label" in table.obs.columns:
-                table.obs_names = table.obs["label"]
+                table.obs_names = table.obs["label"].astype(str)
             table = table.to_df()
 
-            if table.empty or idx >= len(table):
+            if table.empty or str(idx) not in table.index:
                 thresholds[stain][1].append(np.nan)
                 continue
 
-            entry = table.loc[str(idx), :]
+            entry = table.loc[str(idx)]
             ul_y, ul_x = entry["y_micrometer"], entry["x_micrometer"]
             lr_y = ul_y + entry["len_y_micrometer"]
             lr_x = ul_x + entry["len_x_micrometer"]
 
-            ch = thresholds[stain][0] - 1
             try:
                 img = img_r.get_array_by_coordinate(
                     pyramid_level=pyramid_level,
                     upper_left_yx=(ul_y, ul_x),
                     lower_right_yx=(lr_y, lr_x),
-                )
-                img = img[ch, 0]
-            except Exception:
+                )[ch, 0]
+            except Exception as e:
+                warnings.warn(f"Image load failed for {uid} ({stain}): {e}")
                 thresholds[stain][1].append(np.nan)
                 continue
 
             img = filters.gaussian(img, sigma=sigma, preserve_range=True)
+            raw = filters.threshold_triangle(img) if np.max(img) != 0 else np.nan
+            thresholds[stain][1].append(raw)
 
-            if np.max(img) != 0:
-                thresholds[stain][1].append(filters.threshold_triangle(img))
-            else:
-                thresholds[stain][1].append(np.nan)
+        raw_vals = thresholds[stain][1]
+        thresholds[stain][2] = float(np.nanquantile(raw_vals, q=q)) if raw_vals else np.nan
 
-        if len(thresholds[stain][1]) > 0:
-            thresholds[stain][2] = float(np.nanquantile(thresholds[stain][1], q=q))
-        else:
-            thresholds[stain][2] = np.nan
-
-    return thresholds, dict_org, timepoints_lst
+    return thresholds, dict_org, days
 
 
 
