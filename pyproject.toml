@@ -1,0 +1,30 @@
+[project]
+name = "1-scripts"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "anndata>=0.12.19",
+    "ez-zarr>=0.4.2",
+    "ipykernel>=7.3.0",
+    "ipython>=9.15.0",
+    "matplotlib>=3.11.0",
+    "natsort>=8.4.0",
+    "numpy>=1.26.4",
+    "opencv-python-headless>=4.11.0.86",
+    "pandas>=2.3.3",
+    "phenograph>=1.5.7",
+    "pyslingshot>=0.2.0",
+    "scanpy>=1.11.5",
+    "scikit-learn>=1.9.0",
+    "scipy>=1.17.1",
+    "seaborn>=0.13.2",
+    "skan>=0.13.1",
+    "tqdm>=4.68.3",
+]
+
+[dependency-groups]
+dev = [
+    "deptry>=0.25.1",
+]

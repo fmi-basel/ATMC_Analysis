@@ -960,7 +960,7 @@ def convex_hull_features(mask, row_data, OID, spacing, min_area_fraction=0.005):
     prop_2D = measure.regionprops(mask, spacing=(spacing, spacing))[0]
 
     object_image = prop_2D.image
-    convex_image = prop_2D.convex_image
+    convex_image = prop_2D.image_convex
     object_area = prop_2D.area
 
     diff_img = convex_image ^ object_image  # True where object is concave
@@ -993,7 +993,7 @@ def convex_hull_features(mask, row_data, OID, spacing, min_area_fraction=0.005):
     row_data["asymmetry"] = centroid_dist
 
     # Normalized area difference between convex hull and object as concavity metric
-    row_data["concavity"] = (prop_2D.convex_area - object_area) / prop_2D.convex_area
+    row_data["concavity"] = (prop_2D.area_convex - object_area) / prop_2D.area_convex
 
     return row_data
 
@@ -1498,7 +1498,6 @@ def estimate_staining_thresholds_multicycle(
     """
     random.seed(seed)
     rounds_needed = {round_id, segmentation_round}
-    print("hi")
     # Build stain → [channel_idx, raw_values, final_threshold] per AB mix for this round
     thresholds = {}
     for ab_mix in stainings:
