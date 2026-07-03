@@ -67,26 +67,84 @@ Place a `Layout*.xlsx` in the same experiment folder. The pipeline reads stain/c
 
 ## Getting Started
 
-### 1. Create and activate the conda environment
+## Environment Setup
 
+### 1. Install uv
+
+Choose the instructions for your operating system.
+
+**macOS / Linux**
 ```bash
-conda env create -f environment.yml
-conda activate atmc_analysis
+curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
-If a dependency is missing, install it via pip inside the environment:
-
-```bash
-pip install <package>
+**Windows (PowerShell)**
+```powershell
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
 ```
 
-### 2. Run the notebooks
+After installation, restart your terminal and verify it worked:
+```bash
+uv --version
+```
 
-From the repo root:
+### 2. Clone the Repository
 
 ```bash
-jupyter notebook
+git clone <your-repo-url>
+cd <project-folder>
 ```
+
+Make sure `pyproject.toml`, `uv.lock`, and `.python-version` are present in this folder before continuing.
+
+### 3. Create the Environment and Install Dependencies
+
+Run this single command on **any** OS — uv reads `.python-version`, downloads that Python version if it's not already installed, creates a `.venv` folder, and installs the exact package versions from `uv.lock`.
+
+```bash
+uv sync
+```
+## Notes for Shared Linux Server Users (e.g. via SSH)
+
+If you're working on a shared server where installing into the base Python is not permitted, use a personal conda environment instead of `.venv`:
+
+```bash
+conda create -n atmc_hcs_env python=3.13 -c conda-forge --override-channels
+conda activate atmc_hcs_env
+pip install uv
+export UV_PROJECT_ENVIRONMENT=$CONDA_PREFIX
+uv sync
+python -m ipykernel install --user --name=ATMC_HCS_Analysis --display-name="ATMC HCS Analysis"
+```
+
+If `conda create` fails with a `403 FORBIDDEN` error on the `pkgs/main` channel, this is due to Anaconda's default channel access restrictions — using `-c conda-forge --override-channels` as shown above resolves this.
+
+### 4. Activate the Environment
+
+**macOS / Linux**
+```bash
+source .venv/bin/activate
+```
+
+**Windows (PowerShell)**
+```powershell
+.venv\Scripts\activate
+```
+
+**Windows (Command Prompt)**
+```cmd
+.venv\Scripts\activate.bat
+```
+
+### 5. Register the Jupyter Kernel
+
+With the environment activated, run:
+
+```bash
+python -m ipykernel install --user --name=ATMC_HCS_Analysis --display-name="ATMC HCS Analysis"
+```
+
+### 6. Run the notebooks
 
 Open `1_FeatureExtraction.ipynb` and configure the following parameters:
 
@@ -109,6 +167,7 @@ Typical outputs produced by the pipeline:
 - **Tables (`.csv`)** saved under an `analysis` directory (e.g., `.../2_Tables/`).
 - **AnnData (`.h5ad`)** containing:
   - Numerical features in `X`
+  - Normalized features in `layers`
   - Metadata in `obs`
   - Configuration in `uns`
 
