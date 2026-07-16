@@ -338,7 +338,9 @@ def normalize_groups(adata, group_by, control=None):
     adata.layers["robust_scaled"] = robust_normalized_data
     adata.layers["z_scaled"]      = z_normalized_data
     adata.layers["minmax_scaled"] = minmax_normalized_data
-    check_control_normalization(adata, control=control, group_by=group_by)
+
+    if control is not None:
+        check_control_normalization(adata, control=control, group_by=group_by)
     return adata
 
 

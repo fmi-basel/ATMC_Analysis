@@ -107,6 +107,7 @@ def save_adata(adata, filename, keys_to_remove = ["ome_zarr_dict", "ome_zarr_df"
             backup[key] = adata.uns.pop(key)
 
     try:
+        anndata.settings.allow_write_nullable_strings = True
         adata.write(savepath, compression="gzip")
     finally:
         # Restore removed keys regardless of success or error to avoid mutation side effects
