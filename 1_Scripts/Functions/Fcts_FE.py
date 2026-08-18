@@ -63,6 +63,7 @@ Strategy:
 
 
 def make_experiment(source, folder, layout_sheets = ["MediumLayout", "StainingLayout", "LineLayout", "OtherLayout"]):
+    
     """
     Parses an experiment's plate layout Excel file and returns a nested dictionary of well metadata.
 
@@ -175,7 +176,7 @@ def make_experiment(source, folder, layout_sheets = ["MediumLayout", "StainingLa
     barcodes = set(all_plates[layout_sheets[0]].keys())
     for others in layout_sheets[1:]:
         barcodes &= set(all_plates[others].keys())
-    barcodes = sorted(list(barcodes))
+    barcodes = list(barcodes)
 
     # 3. Compose nested dict: barcode -> well -> list of values from all sheets
     result = {}

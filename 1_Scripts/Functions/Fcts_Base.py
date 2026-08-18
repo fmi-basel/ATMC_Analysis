@@ -173,6 +173,7 @@ def save_after_filtering(df, df_raw, ad_raw, save_dir = None):
     save_adata(ad, "2_FeaturesFiltered")
 
 def find_zarr_dirs(root_dir, max_depth=None, file_ending=".zarr", analysis_dir = None):
+
     """
     Finds all OME-Zarr directories within a given root directory,
     stopping at the first depth where any are found.
@@ -230,7 +231,7 @@ def find_zarr_dirs(root_dir, max_depth=None, file_ending=".zarr", analysis_dir =
         return []
     print(f"Found {len(zarr_dirs)} OME-Zarr directories in {root_dir} at depth {min_depth_found}.")
 
-    return zarr_dirs, analysis_dir
+    return natsorted(zarr_dirs), analysis_dir
 
 def find_staining_in_ABs(stainings, staining_to_find):
     """Find AB mixes that contain a staining, supporting both legacy and round-aware stainings."""
