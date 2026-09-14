@@ -21,9 +21,34 @@ def remove_uns(ad, keys_to_remove):
 
     return ad
 
+def infer_barcode_folder_map(ad):
+    """
+    Derive a {barcode: plate_root_folder} mapping from ad.obs["Barcode"]/ad.obs["PATH"].
+
+    ad.uns["folders"] is a plain list, positionally matched against
+    ad.uns["experiment_setup"] (a dict) at extraction time. After a save/reload
+    round-trip through .h5ad, anndata/h5py does not guarantee that a dict stored in
+    .uns keeps its original key order, while list-valued entries like "folders" do
+    keep their order. That silently desyncs the two, pairing barcodes with the wrong
+    plate folder. ad.obs["PATH"] (recorded per-organoid at extraction time, before
+    any reload) still reflects the true barcode -> folder pairing, so recover it from
+    there instead of trusting positional order.
+    """
+    if "Barcode" not in ad.obs.columns or "PATH" not in ad.obs.columns:
+        return None
+    mapping = {}
+    for bc, path in zip(ad.obs["Barcode"], ad.obs["PATH"]):
+        if bc in mapping:
+            continue
+        # path looks like <plate_root>/<row>/<col>/<image_name>
+        mapping[bc] = "/".join(str(path).rstrip("/").split("/")[:-3])
+    return mapping
+
 def add_zarr_uns(ad):
 
-    ome_zarr_dict, ome_zarr_df =  extract_ome_zarr_tables(ad.uns["experiment_setup"],ad.uns["source_dir"], ad.uns["folders"], ad.uns["table_name"])
+    folder_map = infer_barcode_folder_map(ad)
+    folders = folder_map if folder_map else ad.uns["folders"]
+    ome_zarr_dict, ome_zarr_df =  extract_ome_zarr_tables(ad.uns["experiment_setup"],ad.uns["source_dir"], folders, ad.uns["table_name"])
 
     # Attach in-memory ome_zarr_dict to AnnData .uns (DO NOT save this inside AnnData file!)
     ad.uns["ome_zarr_dict"] = ome_zarr_dict
@@ -276,8 +301,13 @@ def extract_ome_zarr_tables(experiment_setup, source, folder, table_name):
         Example: {barcode: {well: [Medium, AB, Day], ...}, ...}
     - source: str
         Root directory path containing the OME-Zarr folders.
-    - folder: list of str
-        List of folder names corresponding to each barcode.
+    - folder: list of str, or dict {barcode: str}
+        Folder name for each barcode. If a list, folder[i] is paired
+        positionally with the i-th key of experiment_setup (only safe when
+        experiment_setup's key order is known to match folder's order, e.g.
+        right after both are freshly built in the same session). If a dict,
+        each barcode's folder is looked up by key, which is robust to
+        experiment_setup's key order changing (e.g. after an .h5ad reload).
     - ome_zarr: module/object
         Module/object providing import_plate and related methods.
     - table_name: str
@@ -297,7 +327,8 @@ def extract_ome_zarr_tables(experiment_setup, source, folder, table_name):
     all_plate_dfs = []
 
     for i, barcode in enumerate(experiment_setup):
-        plate = ome_zarr.import_plate(os.path.join(source, folder[i]))
+        folder_path = folder[barcode] if isinstance(folder, dict) else folder[i]
+        plate = ome_zarr.import_plate(os.path.join(source, folder_path))
         ome_zarr_dict[barcode] = plate
         df_lst = plate.get_table(table_name, as_AnnData = True)
 

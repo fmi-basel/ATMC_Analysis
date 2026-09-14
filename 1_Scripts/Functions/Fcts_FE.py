@@ -2079,8 +2079,7 @@ def merge_feature_tables_from_zarr(
                 ad_well.obs["PATH"] = path_in_plate
                 ad_well.obs["Multiplexing_Round"] = multiplexing_round
 
-                idx_in_well = pd.Series(range(ad_well.n_obs), index=ad_well.obs_names)
-                ad_well.obs["Organoid_ID"] = barcode_guess + "-" + well + "-" + idx_in_well.astype(str).values
+                ad_well.obs["Organoid_ID"] = barcode_guess + "-" + well + "-" + ad_well.obs_names.astype(str).values
 
                 exp_info = meta.get(well, [None, None, None, None])
                 ad_well.obs["Medium"] = exp_info[0]

@@ -51,8 +51,8 @@ def load_img_mask_by_UID(UID, stainings, experiment_setup, ome_zarr_dict, table_
     
     if table.empty:
         raise ValueError(f"Table {table_name} is empty for well {well} in barcode {bc}.")
-    if index < 0 or index > len(table):
-        raise IndexError(f"Index {index} out of bounds for table length {len(table)}")
+    if str(index) not in table.index:
+        raise KeyError(f"Label {index} not found in table {table_name} for well {well} in barcode {bc} (table has {len(table)} entries).")
 
     entry = table.loc[str(index), :]
     ul_y, ul_x = entry["y_micrometer"], entry["x_micrometer"]
@@ -157,7 +157,7 @@ def segmentation_fidelity_check(ome_zarrs_dict, channel, channel_color, channel_
             n_max = int(np.max(label))
             if n_max == 0:
                 ax.set_axis_off()
-                return
+                continue
 
             rng = np.random.default_rng()
             colors = rng.random((n_max + 1, 4))
@@ -238,8 +238,10 @@ def plot_random_organoids_per_cluster(
                          Only the image in the first row and first column (top-left) will display the scalebar.
         add_boundary: If True, overlays the segmentation boundary on the image as np.max(img).
     """
-    from Functions.Fcts_Base import extract_ome_zarr_tables
-    ad.uns["ome_zarr_dict"], ad.uns["ome_zarr_df"] = extract_ome_zarr_tables(ad.uns["experiment_setup"], ad.uns["source_dir"], ad.uns["folders"], ad.uns["table_name"])
+    from Functions.Fcts_Base import extract_ome_zarr_tables, infer_barcode_folder_map
+    folder_map = infer_barcode_folder_map(ad)
+    folders = folder_map if folder_map else ad.uns["folders"]
+    ad.uns["ome_zarr_dict"], ad.uns["ome_zarr_df"] = extract_ome_zarr_tables(ad.uns["experiment_setup"], ad.uns["source_dir"], folders, ad.uns["table_name"])
 
     # ---------- validations ----------
     required_uns = ("ome_zarr_dict", "table_name", "label_name", "pixel_spacing", "stainings")
@@ -554,8 +556,10 @@ def plot_all_stainings_per_UID(
         Nested dict of the form:
         {uid: {staining: (img, msk)}}
     """
-    from Functions.Fcts_Base import extract_ome_zarr_tables
-    ad.uns["ome_zarr_dict"], ad.uns["ome_zarr_df"] = extract_ome_zarr_tables(ad.uns["experiment_setup"], ad.uns["source_dir"], ad.uns["folders"], ad.uns["table_name"])
+    from Functions.Fcts_Base import extract_ome_zarr_tables, infer_barcode_folder_map
+    folder_map = infer_barcode_folder_map(ad)
+    folders = folder_map if folder_map else ad.uns["folders"]
+    ad.uns["ome_zarr_dict"], ad.uns["ome_zarr_df"] = extract_ome_zarr_tables(ad.uns["experiment_setup"], ad.uns["source_dir"], folders, ad.uns["table_name"])
 
     if isinstance(uids, str):
         uids = [uids]

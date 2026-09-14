@@ -502,10 +502,6 @@ def plate_bias_overview(
     for feat in plt_features:
         for day in ad.obs["Other"].unique():
 
-            df_HM = build_heatmap_df(plate_size)
-            if df_HM is None:
-                continue
-
             # Filter observations by day first
             obs_filtered = ad.obs[ad.obs["Other"] == day]
 
@@ -522,55 +518,70 @@ def plate_bias_overview(
             # Combine data and obs as before
             df = pd.concat([df_data, obs_filtered.astype(str)], axis=1)
 
-            for cellline in df.Cell_line.unique():
-                for medium in df.Medium.unique():
-                    df_plt = df[(df.Cell_line == cellline) & (df.Medium == medium)].copy()
-                    if df_plt.empty or feat not in df_plt.columns:
-                        continue
+            # One heatmap per physical plate (Barcode): a Well label alone does not
+            # uniquely identify a well across plates, so pooling wells from different
+            # barcodes into one heatmap would silently mix or overwrite unrelated data.
+            for barcode in df.Barcode.unique():
+                df_HM = build_heatmap_df(plate_size)
+                if df_HM is None:
+                    continue
 
-                    # Compute mean of feature per well (no z-scoring)
-                    grouped = df_plt.groupby("Well")[feat].mean()
+                df_bc = df[df.Barcode == barcode]
 
-                    # Fill heatmap DataFrame
-                    for well, val in grouped.items():
-                        row = well[0]
-                        col = well[1:].lstrip("0").zfill(2)
-                        if row in df_HM.index and col in df_HM.columns:
-                            df_HM.loc[row, col] = val
+                for cellline in df_bc.Cell_line.unique():
+                    for medium in df_bc.Medium.unique():
+                        df_plt = df_bc[(df_bc.Cell_line == cellline) & (df_bc.Medium == medium)].copy()
+                        if df_plt.empty or feat not in df_plt.columns:
+                            continue
 
-            plot_heatmap_with_means(df_HM, title=f"{day} {feat}")
+                        # Compute mean of feature per well (no z-scoring)
+                        grouped = df_plt.groupby("Well")[feat].mean()
+
+                        # Fill heatmap DataFrame
+                        for well, val in grouped.items():
+                            row = well[0]
+                            col = well[1:].lstrip("0").zfill(2)
+                            if row in df_HM.index and col in df_HM.columns:
+                                df_HM.loc[row, col] = val
+
+                plot_heatmap_with_means(df_HM, title=f"{barcode} {day} {feat}")
 
     # Similarly for Outgrowth plotting, apply the same filtering
+    df_out = ad.uns.get("Outgrowth_DF")
+    if df_out is None:
+        print("Outgrowth_DF not found in ad.uns")
+        return
+
     for day in ad.obs["Other"].unique():
 
-        df_HM = build_heatmap_df(plate_size)
-        df_out = ad.uns.get("Outgrowth_DF")
-        if df_out is None:
-            print("Outgrowth_DF not found in ad.uns")
-            return
         df_out_day = df_out[df_out.Other == str(day)]
-        
+
         if control_only:
             if not control_condition:
                 raise ValueError("control_condition must be specified if control_only=True")
             # Filter outgrowth DF by control_condition keys and values
             for k, v in control_condition.items():
                 df_out_day = df_out_day[df_out_day[k] == v]
-        
-        for cellline in df_out_day.Cell_line.unique():
 
-            for medium in df_out_day.Medium.unique():
-                df_plt = df_out_day[(df_out_day.Cell_line == cellline) & (df_out_day.Medium == medium)].copy()
+        # One heatmap per physical plate (Barcode) - see comment above for why.
+        for barcode in df_out_day.Barcode.unique():
+            df_HM = build_heatmap_df(plate_size)
+            df_out_bc = df_out_day[df_out_day.Barcode == barcode]
 
-                if df_plt.empty:
-                    continue
+            for cellline in df_out_bc.Cell_line.unique():
 
-                grouped = df_plt.groupby("Well")["Organoid_No"].mean()
+                for medium in df_out_bc.Medium.unique():
+                    df_plt = df_out_bc[(df_out_bc.Cell_line == cellline) & (df_out_bc.Medium == medium)].copy()
 
-                for well, val in grouped.items():
-                    row = well[0]
-                    col = well[1:].lstrip("0").zfill(2)
-                    if row in df_HM.index and col in df_HM.columns:
-                        df_HM.loc[row, col] = val
+                    if df_plt.empty:
+                        continue
 
-        plot_heatmap_with_means(df_HM, title=f"{day} Outgrowth")
+                    grouped = df_plt.groupby("Well")["Organoid_No"].mean()
+
+                    for well, val in grouped.items():
+                        row = well[0]
+                        col = well[1:].lstrip("0").zfill(2)
+                        if row in df_HM.index and col in df_HM.columns:
+                            df_HM.loc[row, col] = val
+
+            plot_heatmap_with_means(df_HM, title=f"{barcode} {day} Outgrowth")
