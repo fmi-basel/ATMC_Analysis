@@ -415,7 +415,6 @@ def plot_random_organoids_per_cluster(
                     continue
 
                 oid = sampled_ids[cidx]
-                ab = ad.obs.loc[oid, "ABs"]
 
                 try:
                     if normalize_sizes:
@@ -477,6 +476,7 @@ def plot_random_organoids_per_cluster(
                     ax_curr.text(0.5, 0.5, f"Failed\n{oid}", ha="center", va="center",
                                  fontsize=8, color="white")
                     ax_curr.axis("off")
+                    print(f"Warning: failed to render {oid} ({st}): {e}")
 
     fig.tight_layout()
 
@@ -563,7 +563,13 @@ def plot_all_stainings_per_UID(
 
     for uid in uids:
         bc, well, _ = uid.rsplit("-", 2)
-        uid_stainings = [f"R{k}__{marker}" for k, markers in ad.uns["stainings"][ad.uns["experiment_setup"][bc][well][1]].items() for marker in markers]
+        # stains are indexed by imaging channel, with "" where a channel carries no stain
+        uid_stainings = [
+            f"R{k}__{marker}"
+            for k, markers in ad.uns["stainings"][ad.uns["experiment_setup"][bc][well][1]].items()
+            for marker in markers
+            if marker
+        ]
 
         n = len(uid_stainings)
         fig, axes = plt.subplots(1, n, figsize=(figsize_per_panel[0] * n, figsize_per_panel[1]))

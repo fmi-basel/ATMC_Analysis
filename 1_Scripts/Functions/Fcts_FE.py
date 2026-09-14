@@ -10,7 +10,6 @@ from skan import Skeleton, summarize
 from IPython.display import display
 import matplotlib.pyplot as plt
 from scipy.ndimage import label, mean as ndi_mean
-from tqdm.notebook import tqdm
 import seaborn as sns
 import pandas as pd
 from ez_zarr import ome_zarr
@@ -19,8 +18,6 @@ import itertools
 import datetime
 import anndata
 import random
-import glob
-import copy
 import math
 import cv2
 import os
@@ -1334,13 +1331,15 @@ def intensity_features_for_round(
                 "probably at different pixel sizes or are not on the same grid."
             )
 
-        # Smooth and mask
-        img_proc = filters.gaussian(img, sigma=sigma, preserve_range=True)
-        img_proc[~mask_bool] = 0
-
-        # Threshold mask for this stain/round (only used if thresholded features requested)
-        thr = thresholds_round.get(stain, 0)
-        mask_channel = (img_proc > thr) & mask_bool
+        # Smooth, mask and threshold - but only when something actually consumes the
+        # result, since the blur runs per stain per object.
+        if include_thresholded or include_substructure:
+            img_proc = filters.gaussian(img, sigma=sigma, preserve_range=True)
+            img_proc[~mask_bool] = 0
+            thr = thresholds_round.get(stain, 0)
+            mask_channel = (img_proc > thr) & mask_bool
+        else:
+            mask_channel = np.zeros_like(mask_bool)
 
         # Threshold-derived geometry features (area_T, asymmetry, etc.)
         if include_thresholded:
@@ -1641,10 +1640,6 @@ def plot_thresholds_multicycle(
     segmentation_round: int = 0,
 ):
     """A minimal round-aware replacement for plot_thresholds (supports Round>0 without labels)."""
-
-    import random
-    import matplotlib.pyplot as plt
-    import seaborn as sns
 
     random.seed(seed)
 
@@ -2120,7 +2115,6 @@ def merge_feature_tables_from_zarr(
 
     import os
     import anndata as ad
-    import pandas as pd
     from anndata.io import read_zarr
     from ez_zarr import ome_zarr
 
@@ -2148,7 +2142,7 @@ def merge_feature_tables_from_zarr(
     folder_map = resolve_barcode_folders(
         list(experiment_setup.keys()),
         folder,
-        hints=get_plate_folder_hints(source),
+        hints=None if isinstance(folder, dict) else get_plate_folder_hints(source),
         verbose=not isinstance(folder, dict),
     )
 
@@ -2320,6 +2314,6 @@ def merge_feature_tables_from_zarr_rounds(
 
     if save_merged:
         rtag = "-".join([str(int(r)) for r in rounds])
-        save_adata(ad_all, f"{result_file_name}_merged")
+        save_adata(ad_all, f"{result_file_name}_merged_R{rtag}")
 
     return ad_all

@@ -1,4 +1,3 @@
-from sklearn.preprocessing import RobustScaler, StandardScaler, MinMaxScaler
 import matplotlib.pyplot as plt
 import seaborn as sns
 import scipy.sparse
@@ -99,7 +98,8 @@ def normalize_groups(adata, group_by, control=None):
     lower_var_names = [v.lower() for v in adata.var_names]
     to_transform = [
         adata.var_names[i] for i, v in enumerate(lower_var_names)
-        if any(key in v for key in ["area", "moments", "potency"]) and "ratio" not in v
+        if any(key in v for key in ["area", "moments", "potency", "substructures_size"])
+        and "ratio" not in v
     ]
 
     # Log1p transform (clip non-negative values)
@@ -286,10 +286,6 @@ def plot_heatmap_with_means(data_df, title, ax=None):
     - title: str, title for the heatmap
     - ax: matplotlib Axes or None
     """
-    import numpy as np
-    import seaborn as sns
-    import matplotlib.pyplot as plt
-
     # Calculate means ignoring NaNs
     row_means = data_df.mean(axis=1)
     col_means = data_df.mean(axis=0)
@@ -361,6 +357,16 @@ def plate_bias_overview(
         # Check if the observation row satisfies all key-value pairs in condition dict
         return all(obs_row.get(k, None) == v for k, v in condition.items())
 
+    # Fail on a misspelled feature instead of silently drawing an all-NaN plate.
+    unknown = [f for f in plt_features if f not in ad.var_names]
+    if unknown:
+        raise ValueError(f"Feature(s) not found in ad.var_names: {unknown}")
+
+    # ad.to_df() materialises the whole feature matrix; build it once rather than once per
+    # (feature, day) pair.
+    df_all = ad.to_df()
+    obs_str = ad.obs.astype(str)
+
     for feat in plt_features:
         for day in ad.obs["Other"].unique():
 
@@ -374,11 +380,9 @@ def plate_bias_overview(
                 mask = obs_filtered.apply(lambda row: passes_control_condition(row, control_condition), axis=1)
                 obs_filtered = obs_filtered[mask]
 
-            # Get the expression/dataframe for filtered observations
-            df_data = ad.to_df().loc[obs_filtered.index]
-
-            # Combine data and obs as before
-            df = pd.concat([df_data, obs_filtered.astype(str)], axis=1)
+            # Combine the one needed feature column with the metadata
+            df = pd.concat([df_all.loc[obs_filtered.index, [feat]],
+                            obs_str.loc[obs_filtered.index]], axis=1)
 
             # One heatmap per physical plate (Barcode): a Well label alone does not
             # uniquely identify a well across plates, so pooling wells from different

@@ -333,6 +333,7 @@ phenotype, so they are kept in `obs` as metadata rather than fed to PCA/UMAP/clu
 | Some wells are skipped | Only wells annotated in **all four** layout sheets are processed. The per-plate summary printed during extraction says how many wells and objects were dropped and why. |
 | Fewer objects than expected | Objects whose mask is not a single connected component are skipped by design. The count appears in the per-plate summary. |
 | A stain-specific filter removes everything | Objects stained with a different antibody mix have `NaN` for that feature. `filter_organoids_by` keeps them by default (`keep_na=True`); pass `keep_na=False` to drop them deliberately. |
+| `subsample_anndata_geosketch needs the optional 'geosketch' package` | Geometric sketching is not part of the pinned dependency set. Add it with `uv add geosketch`, or use `random_subset_anndata_frac` instead. |
 | Saving `.h5ad` fails with `"dict key is int"` | Something you added to `adata.uns` has non-string dict keys. Convert them to strings before writing; the pipeline's own round-indexed dicts are already converted. |
 
 ---

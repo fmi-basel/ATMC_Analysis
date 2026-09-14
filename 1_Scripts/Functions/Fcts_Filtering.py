@@ -144,10 +144,8 @@ def filter_organoids_by(ad, df, feature, values, channel, pyramid_level=1, add_b
         n_lower = len(removed_lower)
         rows_lower = 1 if n_lower < 9 else min(4, math.ceil(n_lower / 9))
         cols_lower = min(9, n_lower) if rows_lower == 1 else 9
-        fig1 = get_deleted_organoids(ad, df.loc[removed_lower], df_filtered, rows_lower, cols_lower,
-                                    f"Objects with {feature} < {lower_bound}", feature, channel, pyramid_level, add_boundary=add_boundary)
-    else:
-        fig1 = None
+        get_deleted_organoids(ad, df.loc[removed_lower], df_filtered, rows_lower, cols_lower,
+                              f"Objects with {feature} < {lower_bound}", feature, channel, pyramid_level, add_boundary=add_boundary)
 
     # Visualize removed due to upper boundary
     if n_removed_upper > 0:
@@ -155,10 +153,8 @@ def filter_organoids_by(ad, df, feature, values, channel, pyramid_level=1, add_b
         n_upper = len(removed_upper)
         rows_upper = 1 if n_upper < 9 else min(4, math.ceil(n_upper / 9))
         cols_upper = min(9, n_upper) if rows_upper == 1 else 9
-        fig2 = get_deleted_organoids(ad, df.loc[removed_upper], df_filtered, rows_upper, cols_upper,
-                                    f"Objects with {feature} > {upper_bound}", feature, channel, pyramid_level, add_boundary=add_boundary)
-    else:
-        fig2 = None
+        get_deleted_organoids(ad, df.loc[removed_upper], df_filtered, rows_upper, cols_upper,
+                              f"Objects with {feature} > {upper_bound}", feature, channel, pyramid_level, add_boundary=add_boundary)
 
     return df_filtered
 

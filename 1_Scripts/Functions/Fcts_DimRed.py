@@ -611,8 +611,12 @@ def compute_UMAP(
     if save_plot:
         save_fig(fig, ad.uns["plot_dir"], "UMAP" if len(combos) == 1 else "UMAP_grid", dpi=300)
 
+    # Only one embedding can live in .obsm; when sweeping, that is the last combination.
     if coords is not None:
         ad.obsm["X_umap"] = coords
+        if len(combos) > 1:
+            n, d = combos[-1]
+            print(f"ad.obsm['X_umap'] holds the last combination plotted: n_neighbors={n}, min_dist={d}.")
     if last_ad_sub is not None and "umap" in last_ad_sub.uns:
         ad.uns["umap"] = last_ad_sub.uns["umap"].copy()
 
@@ -773,8 +777,12 @@ def compute_tSNE(
     if save_plot:
         save_fig(fig, ad.uns["plot_dir"], "tSNE" if len(combos) == 1 else "tSNE_grid", dpi=300)
 
+    # Only one embedding can live in .obsm; when sweeping, that is the last combination.
     if coords is not None:
         ad.obsm["X_tsne"] = coords
+        if len(combos) > 1:
+            ppx, lr = combos[-1]
+            print(f"ad.obsm['X_tsne'] holds the last combination plotted: perplexity={ppx}, learning_rate={lr}.")
 
     return ad
 
@@ -1188,7 +1196,16 @@ def run_slingshot(
 
 
 def subsample_anndata_geosketch(ad, fraction=0.1, use_rep="X_pca", random_state=0):
-    import geosketch
+    """Geometric-sketch subsampling. Requires the optional `geosketch` package."""
+    try:
+        import geosketch
+    except ModuleNotFoundError as exc:
+        raise ModuleNotFoundError(
+            "subsample_anndata_geosketch needs the optional 'geosketch' package, which is not "
+            "part of this project's dependencies. Install it into the project environment with "
+            "`uv add geosketch` (or `pip install geosketch`), or use random_subset_anndata_frac "
+            "instead."
+        ) from exc
 
     X = ad.obsm[use_rep]
     n_sketch = int(ad.n_obs * fraction)
