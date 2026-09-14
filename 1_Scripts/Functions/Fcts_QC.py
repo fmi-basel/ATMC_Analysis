@@ -20,8 +20,6 @@ def calculate_outgrowth(ad, n_seeded):
     - ad (anndata.AnnData): AnnData object containing organoid data.
     - n_seeded (int): Number of cells seeded per well (assumed constant).
     """
-    import pandas as pd
-
     experiment_setup = ad.uns["experiment_setup"]
     df = pd.concat([ad.to_df(), ad.obs.astype(str)], axis=1)
     group_cols = ["Other", "Cell_line", "Medium", "Well", "Barcode"]
@@ -38,9 +36,11 @@ def calculate_outgrowth(ad, n_seeded):
             )
             if not is_present.any():
                 setup = experiment_setup[bc][well]
+                # df comes from ad.obs.astype(str), so stringify here too - otherwise these
+                # rows never match the `df_out.Other == str(day)` comparisons downstream.
                 new_row = {
-                    "Other": setup[3],
-                    "Cell_line": setup[2],
+                    "Other": str(setup[3]),
+                    "Cell_line": str(setup[2]),
                     "Medium": str(setup[0]),
                     "Well": well,
                     "Barcode": bc,
@@ -58,138 +58,6 @@ def calculate_outgrowth(ad, n_seeded):
 
     ad.uns["Outgrowth_DF"] = outgrowth
     return ad
-
-
-def build_heatmap_df(plate_size):
-    """
-    Build an empty DataFrame for heatmap plotting based on the plate size.
-
-    Parameters:
-    - plate_size (int): Size of the plate (96 or 384).
-    """
-
-    if plate_size == 384:
-        index_lst = ["A", "B" , "C", "D", "E", "F", "G", "H", "I", "J", "K" , "L" , "M" , "N" , "O", "P"]
-        col_lst = [str(x) for x in range(1,25)]
-        for i,el in enumerate(col_lst):
-            if len(el) == 1:
-                col_lst[i] = str(0)+el
-
-    if plate_size == 96:
-        index_lst = ["A", "B" , "C", "D", "E", "F", "G", "H"]
-        col_lst = [str(x) for x in range(1,13)]
-        for i,el in enumerate(col_lst):
-            if len(el) == 1:
-                col_lst[i] = str(0)+el
-
-    df_plot_HM = pd.DataFrame(np.nan, index = index_lst, columns = col_lst)
-
-    if (plate_size != 96) and (plate_size != 384):
-        print("plate size not configured.")
-
-    return df_plot_HM
-
-
-def plate_bias_overview(plt_features, ad, plate_size):
-    """
-    Generate heatmaps illustrating plate bias based on specified features and experimental conditions.
-
-    Parameters:
-    - plt_features (list): List of features for heatmap plotting.
-    - ad (anndata.AnnData): AnnData object containing organoid data.
-    - plate_size (int): Size of the plate (96 or 384).
-    """
-
-    for feat in plt_features:
-
-        for day in ad.obs["Other"].unique():
-
-            fig, ax = plt.subplots(ncols = 1, nrows = 1, figsize =(10,5))
-
-            # Built empty DF
-            df_HM = build_heatmap_df(plate_size)
-
-            # Go through conds and use compute minmax scale
-            df = pd.concat([ad[ad.obs.Other == day].to_df(), ad[ad.obs.Other == day].obs.astype(str)], axis = 1)
-
-            for cellline in df.Cell_line.unique():
-
-                for medium in df.Medium.unique():
-
-                    # Take values and filter
-                    df_plt = df[(df.Cell_line == cellline) & (df.Medium == medium)].copy(deep = True)
-
-                    # z-scoring
-                    mean = np.mean(df_plt[feat])
-                    sd = np.std(df_plt[feat], axis = 0)
-                    df_plt.loc[:,"plt"] = abs(df_plt[feat].transform(lambda x : (x - mean)/sd))
-
-                    # GroupBy
-                    grouped = df_plt.groupby(["Well"])["plt"].mean().to_frame()
-
-                    # Put into heatmap based on well
-                    for well in grouped.index:
-                        df_HM.loc[well[0], well[1:]] = grouped.loc[well]["plt"]
-
-
-            # Plot
-            f1 = sns.heatmap(data= df_HM,
-                    linewidth = 1,
-                    square = True,
-                    cmap='RdBu_r',
-                    robust = False)
-
-            f1.xaxis.set_ticks_position("top")
-            f1.tick_params(left=False, top=False)
-
-            ax.set_title(day+" "+feat, fontsize = 18, y = 1.05)
-
-            fig.tight_layout()
-
-
-    for day in ad.obs["Other"].unique():
-
-        fig, ax = plt.subplots(ncols = 1, nrows = 1, figsize =(10,5))
-
-        # Built empty DF
-        df_HM = build_heatmap_df(plate_size)
-
-        # Go through conds and use compute minmax scale
-        df = ad.uns["Outgrowth_DF"]
-        df = df[df.Other == day]
-
-        for cellline in df.Cell_line.unique():
-
-            for medium in df.Medium.unique():
-
-                # Take values and filter
-                df_plt = df[(df.Cell_line == cellline) & (df.Medium == medium)].copy(deep = True)
-
-                # z-scoring
-                df_plt.loc[:,"plt"] = abs(df_plt["Organoid_No"].transform(lambda x : (x - np.mean(df_plt[["Organoid_No"]]))/np.std(df_plt[["Organoid_No"]], axis = 0)))
-
-                # Group and compute medians
-                grouped = df_plt.groupby(["Well"])["plt"].mean().to_frame()
-
-
-                # Put into heatmap based on well
-                for well in grouped.index:
-                    df_HM.loc[well[0], well[1:]] = grouped.loc[well]["plt"]
-
-        # Plot outgrowth
-        f1 = sns.heatmap(data= df_HM,
-                linewidth = 1,
-                square = True,
-                cmap='RdBu_r',
-                robust = False)
-
-        f1.xaxis.set_ticks_position("top")
-        f1.tick_params(left=False, top=False)
-
-        ax.set_title(day+" Outgrowth", fontsize = 18, y = 1.05)
-
-        fig.tight_layout()
-
 
 
 def normalize_groups(adata, group_by, control=None):
@@ -388,12 +256,6 @@ def check_control_normalization(adata, control, group_by, tol=0.5):
             results[(layer, str(group))] = {"metric": metric_name, "max_deviation": max_dev}
 
     return results
-
-
-import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
-import seaborn as sns
 
 
 def build_heatmap_df(plate_size):

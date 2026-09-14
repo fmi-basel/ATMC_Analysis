@@ -25,14 +25,13 @@ def infer_barcode_folder_map(ad):
     """
     Derive a {barcode: plate_root_folder} mapping from ad.obs["Barcode"]/ad.obs["PATH"].
 
-    ad.uns["folders"] is a plain list, positionally matched against
-    ad.uns["experiment_setup"] (a dict) at extraction time. After a save/reload
-    round-trip through .h5ad, anndata/h5py does not guarantee that a dict stored in
-    .uns keeps its original key order, while list-valued entries like "folders" do
-    keep their order. That silently desyncs the two, pairing barcodes with the wrong
-    plate folder. ad.obs["PATH"] (recorded per-organoid at extraction time, before
-    any reload) still reflects the true barcode -> folder pairing, so recover it from
-    there instead of trusting positional order.
+    Current extractions store ad.uns["folders"] as a {barcode: folder} dict (see
+    resolve_barcode_folders), so this is only needed for AnnData files written before
+    that change, where "folders" was a plain list positionally matched against
+    ad.uns["experiment_setup"]. A save/reload round-trip through .h5ad does not
+    guarantee that a dict in .uns keeps its key order, which silently desynced the two.
+    ad.obs["PATH"] is recorded per-organoid at extraction time and still reflects the
+    true barcode -> folder pairing, so recover it from there rather than trusting order.
     """
     if "Barcode" not in ad.obs.columns or "PATH" not in ad.obs.columns:
         return None
@@ -168,14 +167,15 @@ def save_fig(fig, path, filename, dpi=300):
     fig.savefig(savepath_png, transparent=True, dpi=dpi, bbox_inches="tight")
     print(f"Saved as:\n{savepath_pdf}\nand\n{savepath_png}")
 
-def save_after_filtering(df, df_raw, ad_raw, save_dir = None):
+def save_after_filtering(df, df_raw, ad_raw):
     """
     Save the filtered DataFrame, updated AnnData object, and a list of deleted organoid IDs.
 
     Parameters:
-    - save_dir (str): Directory path to save the results.
     - df (pd.DataFrame): Filtered DataFrame containing organoid information.
-    - ad_raw (anndata.AnnData): Original AnnData object.
+    - df_raw (pd.DataFrame): Unfiltered DataFrame, used to record which IDs were removed.
+    - ad_raw (anndata.AnnData): Original AnnData object. Left unmodified: the runtime-only
+      keys are stripped from the saved copy, so the filtering cells stay re-runnable.
     """
 
     save_dir = ad_raw.uns["table_dir"]
@@ -183,13 +183,10 @@ def save_after_filtering(df, df_raw, ad_raw, save_dir = None):
     # Save DF
     save_df(save_dir, "2_FeaturesFiltered"+"_{date:%Y-%m-%d_%Hh%Mmin%Ss}".format(date=datetime.datetime.now()), df)
 
-    keys_to_remove = ["ome_zarr_dict", "ome_zarr_df"]
-    for key in keys_to_remove:
-        if key in ad_raw.uns:
-            ad_raw.uns.pop(key)
-
-    # Filter anndata
+    # Filter anndata, then strip runtime-only keys from the copy (not from ad_raw)
     ad = ad_raw[df.index,:].copy()
+    for key in ["ome_zarr_dict", "ome_zarr_df"]:
+        ad.uns.pop(key, None)
 
     # Save list of deleted organoid IDs
     ad.uns["deleted_IDs"] = list(set(df_raw.index.to_list()) - set(df.index.to_list()))
@@ -252,11 +249,184 @@ def find_zarr_dirs(root_dir, max_depth=None, file_ending=".zarr", analysis_dir =
             queue.append((os.path.join(current_dir, d), current_depth + 1))
 
     if not zarr_dirs:
-        print("No OME-Zarr directories found. Please check the root directory and depth.")
-        return []
+        raise FileNotFoundError(
+            f"No directories ending in '{file_ending}' found under {root_dir}"
+            + (f" within depth {max_depth}." if max_depth is not None else ".")
+            + " Check the experiment folder and the file_ending parameter."
+        )
     print(f"Found {len(zarr_dirs)} OME-Zarr directories in {root_dir} at depth {min_depth_found}.")
 
     return natsorted(zarr_dirs), analysis_dir
+
+
+def _layout_file(source):
+    """
+    Return the single Layout*.xlsx in `source`.
+
+    All layout readers go through this so they can never disagree about which file
+    they are reading when more than one is present.
+    """
+    matches = natsorted(glob.glob(os.path.join(source, "Layout*.xlsx")))
+    if not matches:
+        raise FileNotFoundError(f"No Layout*.xlsx found in {source}")
+    if len(matches) > 1:
+        print(
+            f"Warning: found {len(matches)} Layout*.xlsx files in {source} "
+            f"({[os.path.basename(m) for m in matches]}); using {os.path.basename(matches[0])}."
+        )
+    return matches[0]
+
+
+def _norm_match_key(s):
+    """Lowercase and drop every non-alphanumeric character, so '_', '-' and ' ' never matter."""
+    return "".join(ch for ch in str(s).lower() if ch.isalnum())
+
+
+def get_plate_folder_hints(source, layout_sheets=("MediumLayout", "StainingLayout",
+                                                  "LineLayout", "OtherLayout")):
+    """
+    Read the optional 'Folder:' cells that declare which OME-Zarr folder each plate lives in.
+
+    In any layout sheet, a plate block may carry a folder hint on the same row as its
+    barcode:
+
+        | Barcode: | 260429LG001ACAajACAakD10 | Folder: | acaak_d10 |
+
+    The hint only has to be a substring that uniquely identifies one OME-Zarr folder
+    (matched against the folder name first, then the full path); it does not have to be
+    the complete folder name. Accepted labels are 'Folder:', 'Zarr:' and 'Plate Folder:'.
+
+    Parameters:
+    - source (str): Experiment folder containing the Layout*.xlsx file.
+    - layout_sheets (iterable of str): Sheets to scan for plate blocks.
+
+    Returns:
+    - hints (dict): {barcode: folder hint}. Empty if no hints are present.
+    """
+    filename = _layout_file(source)
+
+    hints = {}
+    for sheet in layout_sheets:
+        try:
+            df = pd.read_excel(filename, sheet_name=sheet, header=None)
+        except ValueError:
+            continue  # sheet not present in this layout file
+        nrows, ncols = df.shape
+        for j in range(nrows):
+            row = df.iloc[j, :]
+            barcode = folder_hint = None
+            for k, v in enumerate(row):
+                if k + 1 >= ncols:
+                    continue
+                label = str(v).strip().lower()
+                if label == "barcode:":
+                    barcode = str(row[k + 1]).strip()
+                elif label in ("folder:", "zarr:", "plate folder:"):
+                    folder_hint = str(row[k + 1]).strip()
+            if barcode and folder_hint and folder_hint.lower() not in ("nan", "none", ""):
+                if barcode in hints and hints[barcode] != folder_hint:
+                    raise ValueError(
+                        f"Conflicting 'Folder:' hints for barcode {barcode}: "
+                        f"'{hints[barcode]}' vs '{folder_hint}'. Make them identical across sheets."
+                    )
+                hints[barcode] = folder_hint
+    return hints
+
+
+def resolve_barcode_folders(barcodes, folders, hints=None, verbose=True):
+    """
+    Map every barcode to exactly one OME-Zarr folder, explicitly and reproducibly.
+
+    Resolution order per barcode:
+      1. the 'Folder:' hint declared in the layout file, if present
+      2. otherwise the barcode itself, matched against the folder name
+
+    In both cases the key is matched as a normalised substring (case-, '_'- and
+    '-'-insensitive), first against the folder name and then against the full path, so a
+    hint such as 'output/2' can disambiguate identical folder names in different parents.
+
+    There is deliberately no positional fallback. Pairing a barcode with a plate by sort
+    order is unverifiable and, when wrong, mislabels every object on that plate instead of
+    failing; so anything that cannot be resolved unambiguously raises here.
+
+    Parameters:
+    - barcodes (list of str): Barcodes from the layout file.
+    - folders (list of str, or dict): Candidate OME-Zarr folders (e.g. from find_zarr_dirs).
+      An already-resolved {barcode: folder} dict is validated and returned unchanged.
+    - hints (dict, optional): {barcode: folder hint} from get_plate_folder_hints.
+    - verbose (bool): Print the resolved pairings for visual confirmation.
+
+    Returns:
+    - folder_map (dict): {barcode: folder path}, in the order of `barcodes`.
+    """
+    barcodes = list(barcodes)
+
+    # Already resolved (e.g. reloaded from ad.uns["folders"]): validate and pass through.
+    if isinstance(folders, dict):
+        missing = [bc for bc in barcodes if bc not in folders]
+        if missing:
+            raise ValueError(f"Folder mapping is missing entries for barcodes: {missing}")
+        return {bc: folders[bc] for bc in barcodes}
+
+    hints = dict(hints or {})
+    folders = [str(f) for f in folders]
+    names = [os.path.basename(f.rstrip("/")) for f in folders]
+
+    mapping, how, problems = {}, {}, []
+
+    for bc in barcodes:
+        key = hints.get(bc, bc)
+        nkey = _norm_match_key(key)
+        if not nkey:
+            problems.append(f"  {bc}: empty match key.")
+            continue
+
+        candidates = [i for i, n in enumerate(names) if nkey in _norm_match_key(n)]
+        if not candidates:
+            candidates = [i for i, f in enumerate(folders) if nkey in _norm_match_key(f)]
+
+        if len(candidates) == 1:
+            mapping[bc] = folders[candidates[0]]
+            how[bc] = f"Folder: '{key}'" if bc in hints else "barcode in folder name"
+        elif not candidates:
+            problems.append(
+                f"  {bc}: no folder matches '{key}'. Add a 'Folder:' cell next to this "
+                f"barcode in the layout file."
+            )
+        else:
+            problems.append(
+                f"  {bc}: '{key}' matches {len(candidates)} folders "
+                f"({[names[i] for i in candidates]}). Make the 'Folder:' hint more specific."
+            )
+
+    claimed = {}
+    for bc, f in mapping.items():
+        if f in claimed:
+            problems.append(f"  {claimed[f]} and {bc} both resolve to {os.path.basename(f)}.")
+        claimed[f] = bc
+
+    if problems:
+        raise ValueError(
+            "Could not resolve barcode -> OME-Zarr folder unambiguously:\n"
+            + "\n".join(problems)
+            + "\n\nAvailable folders:\n"
+            + "\n".join(f"  {n}   ({f})" for n, f in zip(names, folders))
+        )
+
+    if verbose:
+        width = max((len(b) for b in barcodes), default=0)
+        print(f"Resolved {len(mapping)} barcode -> OME-Zarr folder pairings:")
+        for bc in barcodes:
+            print(f"  {bc:<{width}}  ->  {os.path.basename(mapping[bc])}   [{how[bc]}]")
+        unused = [f for f in folders if f not in claimed]
+        if unused:
+            print(
+                f"  Note: {len(unused)} OME-Zarr folder(s) not claimed by any barcode: "
+                f"{[os.path.basename(f) for f in unused]}"
+            )
+
+    return {bc: mapping[bc] for bc in barcodes}
+
 
 def find_staining_in_ABs(stainings, staining_to_find):
     """Find AB mixes that contain a staining, supporting both legacy and round-aware stainings."""
@@ -275,21 +445,21 @@ def find_staining_in_ABs(stainings, staining_to_find):
                 found_in.append(mix)
     return found_in
 
-def find_barcodes_with_day(experiment_setup, d_string):
+def find_barcodes_with_condition(experiment_setup, value):
     """
-    Finds the barcodes where the given "D" string is present.
+    Find the barcodes of plates that use a given condition value in any well.
 
     Parameters:
-    - experiment_setup (dict): The dictionary containing the experiment setup.
-    - d_string (str): The "D" string to search for.
+    - experiment_setup (dict): {barcode: {well: [Medium, AB, Cell_line, Other]}}.
+    - value: The condition value to search for, in any of the four layout slots.
     """
     found_barcodes = []
     for barcode, wells in experiment_setup.items():
         for _, treatments in wells.items():
-            if d_string in treatments:
+            if value in treatments:
                 found_barcodes.append(barcode)
                 break
-    return found_barcodes   
+    return found_barcodes
 
 def extract_ome_zarr_tables(experiment_setup, source, folder, table_name):
     """
@@ -298,7 +468,7 @@ def extract_ome_zarr_tables(experiment_setup, source, folder, table_name):
     Parameters:
     - experiment_setup: dict
         Nested dictionary with barcode as keys and well-specific metadata as values.
-        Example: {barcode: {well: [Medium, AB, Day], ...}, ...}
+        Example: {barcode: {well: [Medium, AB, Cell_line, Other], ...}, ...}
     - source: str
         Root directory path containing the OME-Zarr folders.
     - folder: list of str, or dict {barcode: str}
@@ -322,6 +492,13 @@ def extract_ome_zarr_tables(experiment_setup, source, folder, table_name):
 
     if len(folder) != len(experiment_setup):
         raise ValueError("Length of folder list must match number of barcodes in experiment_setup.")
+
+    if not isinstance(folder, dict):
+        print(
+            "Warning: pairing barcodes to OME-Zarr folders by position. This is only correct "
+            "if both happen to sort identically. Pass the {barcode: folder} mapping returned "
+            "by make_experiment instead."
+        )
 
     ome_zarr_dict = {}
     all_plate_dfs = []
@@ -368,10 +545,13 @@ def extract_ome_zarr_tables(experiment_setup, source, folder, table_name):
 
         # Extract metadata with safe access
         meta = experiment_setup[barcode]
-        plate_df["Medium"] = plate_df["well"].map(lambda w: meta.get(w, [None, None, None])[0])
-        plate_df["AB"] = plate_df["well"].map(lambda w: meta.get(w, [None, None, None])[1])
-        plate_df["Day"] = plate_df["well"].map(lambda w: meta.get(w, [None, None, None])[-1])
-        plate_df["Other"] = plate_df["well"].map(lambda w: meta.get(w, [None, None, None])[-1])
+        # Layout order is [Medium, AB, Cell_line, Other]; index each explicitly. Using [-1]
+        # for both "Day" and "Other" made them duplicates and silently dropped Cell_line.
+        empty = [None, None, None, None]
+        plate_df["Medium"] = plate_df["well"].map(lambda w: meta.get(w, empty)[0])
+        plate_df["AB"] = plate_df["well"].map(lambda w: meta.get(w, empty)[1])
+        plate_df["Cell_line"] = plate_df["well"].map(lambda w: meta.get(w, empty)[2])
+        plate_df["Other"] = plate_df["well"].map(lambda w: meta.get(w, empty)[3])
         all_plate_dfs.append(plate_df)
 
     ome_zarr_df = pd.concat(all_plate_dfs, ignore_index=True)
@@ -393,7 +573,7 @@ def get_stainings(source, sheet="StainingLayout"):
 
     from Functions.Fcts_FE import _stringify_dict_keys
 
-    filename = glob.glob(source + '/Layout*.xlsx')[0]
+    filename = _layout_file(source)
 
     df = pd.read_excel(filename, sheet_name=sheet, header=None)
 
@@ -430,8 +610,22 @@ def get_stainings(source, sheet="StainingLayout"):
     if "Type" in tab.columns:
         tab = tab[~tab["Type"].astype(str).str.lower().str.contains("secondary")]
 
-    tab["Imaging Channel"] = tab["Imaging Channel"].astype(str).str.strip()
-    tab = tab[tab["Imaging Channel"] != ""]
+    # "Imaging Channel" is a 1-based channel number, NOT a position: channel 1 is index 0
+    # of the OME-Zarr channel axis. Parse it as a number so that channels are ordered
+    # numerically (string sorting puts "10" before "2") and gaps stay visible.
+    tab["Imaging Channel"] = pd.to_numeric(tab["Imaging Channel"], errors="coerce")
+    unparsable = tab["Imaging Channel"].isna()
+    if unparsable.any():
+        raise ValueError(
+            "Non-numeric 'Imaging Channel' values in the staining layout for targets: "
+            f"{list(tab.loc[unparsable, 'Target'])}"
+        )
+    tab["Imaging Channel"] = tab["Imaging Channel"].astype(int)
+    if (tab["Imaging Channel"] < 1).any():
+        raise ValueError(
+            "'Imaging Channel' must be 1-based (channel 1 = first channel of the image). "
+            f"Found: {sorted(set(tab['Imaging Channel']))}"
+        )
 
     # Round handling (optional)
     has_round = "Round" in tab.columns
@@ -450,21 +644,41 @@ def get_stainings(source, sheet="StainingLayout"):
             mix_rows.append(data)
     dfmix = pd.DataFrame(mix_rows)
 
-    # Build output: mix -> round -> stains list
+    # Build output: mix -> round -> stains list, indexed by channel.
+    #
+    # Position i of the returned list is the stain imaged on "Imaging Channel" i+1, i.e.
+    # it is directly usable as an index into the OME-Zarr channel axis. Channels with no
+    # stain of their own (brightfield and secondary rows are filtered out above, and a
+    # layout may simply skip a channel) are filled with "" so every later stain keeps its
+    # true channel. Consumers must skip falsy entries.
     out: dict[str, dict[int, list[str]]] = {}
+    gap_notes = []
     for (mix, rnd), g in dfmix.groupby(["Antibody Mix", "Round"]):
-        g = g.copy()
-        chlist = g["Imaging Channel"].astype(float)
-        if chlist.duplicated().any():
-            raise ValueError(f"Duplicate channel for mix {mix}, round {rnd}: {list(g['Imaging Channel'])}")
-        stains = g.sort_values("Imaging Channel")["Target"].tolist()
+        channels = g["Imaging Channel"].astype(int)
+        if channels.duplicated().any():
+            dupes = sorted(channels[channels.duplicated()].unique())
+            raise ValueError(
+                f"Duplicate imaging channel(s) {dupes} for mix {mix}, round {rnd}: "
+                f"{list(zip(g['Target'], channels))}"
+            )
+        stains = [""] * int(channels.max())
+        for channel, target in zip(channels, g["Target"].astype(str)):
+            stains[channel - 1] = target
+        missing = [i + 1 for i, s in enumerate(stains) if not s]
+        if missing:
+            gap_notes.append(f"  {mix} round {rnd}: no stain on channel(s) {missing}; they will be skipped.")
         out.setdefault(mix, {})[int(rnd)] = stains
 
     # Print summary
     print(f"Found {len(out)} staining mixes in experiment setup:")
     for mix, rounds in out.items():
-        rounds_str = ", ".join([f"R{r}({v})" for r, v in sorted(rounds.items())])
+        rounds_str = ", ".join(
+            f"R{r}(" + ", ".join(f"ch{i + 1}:{s}" for i, s in enumerate(v) if s) + ")"
+            for r, v in sorted(rounds.items())
+        )
         print(f"  {mix}: {rounds_str}")
+    for note in gap_notes:
+        print(note)
 
     # Backward compatibility: if no Round column, collapse to legacy list
     if not has_round:
@@ -472,17 +686,3 @@ def get_stainings(source, sheet="StainingLayout"):
         return legacy
 
     return _stringify_dict_keys(out)
-
-def get_folder_names(file_path):
-    """
-    Extracts the names of folders from an absolute path.
-
-    Parameters:
-    - file_path (str): The absolute path.
-    """
-
-    folders = []
-    while file_path and file_path != os.path.dirname(file_path):
-        file_path, folder = os.path.split(file_path)
-        folders.insert(0, folder)
-    return folders

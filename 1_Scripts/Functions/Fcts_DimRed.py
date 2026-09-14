@@ -18,7 +18,7 @@ import phenograph
 import anndata
 
 from Functions.Fcts_Base import remove_uns
-from Functions.Fcts_Plotting import save_fig, load_img_mask_by_UID
+from Functions.Fcts_Plotting import save_fig
 
 
 """
@@ -295,6 +295,7 @@ def compute_PCA(
             else:
                 axis.text(0.5, 0.5, f"Feature '{feat}' not found", ha="center", va="center", fontsize=10)
                 axis.set_axis_off()
+                iterator += 2   # keep the PC pairing in step with the row index
                 continue
 
             x_var = float(var_ratio[iterator - 1] * 100.0) if var_ratio.size >= iterator else np.nan
@@ -984,6 +985,14 @@ def run_phenograph(
     if coords.ndim != 2 or coords.shape[1] < 2:
         raise ValueError(f"Embedding '{embedding_key}' must have at least 2 columns.")
 
+    # Labels are written back onto `ad` by position, so the two objects must describe the
+    # same observations in the same order.
+    if ad_dimred.n_obs != ad.n_obs or not ad_dimred.obs_names.equals(ad.obs_names):
+        raise ValueError(
+            f"ad_dimred and ad must contain the same observations in the same order "
+            f"(got {ad_dimred.n_obs} vs {ad.n_obs}); cluster labels would be misassigned."
+        )
+
     X = ad_dimred.to_df(layer=layer).to_numpy()
     if not np.isfinite(X).all():
         raise ValueError("Clustering input contains non-finite values.")
@@ -1056,98 +1065,6 @@ def run_phenograph(
     return ad
 
 
-def plot_random_organoids_cluster(
-    ad,
-    n_organoids,
-    plot_save_dir=None,
-    channel=0,
-    seed=0,
-    save_plot=False,
-    pyramid_level=1,
-    cluster_key="phenograph_labels",
-):
-    if cluster_key not in ad.obs.columns:
-        raise ValueError(f"Cluster key '{cluster_key}' not found in ad.obs.")
-
-    required_uns = ["ome_zarr_dict", "table_name", "label_name"]
-    missing_uns = [k for k in required_uns if k not in ad.uns]
-    if missing_uns:
-        raise ValueError(f"Missing required ad.uns keys: {missing_uns}")
-
-    if "Organoid_ID" not in ad.obs.columns:
-        raise ValueError("Column 'Organoid_ID' not found in ad.obs.")
-
-    rng = np.random.default_rng(seed)
-    clusters = pd.Categorical(ad.obs[cluster_key])
-    unique_clusters = list(clusters.categories)
-
-    nrows = len(unique_clusters)
-    ncols = n_organoids
-
-    fig, ax = plt.subplots(
-        nrows=nrows,
-        ncols=ncols,
-        figsize=(ncols * 3, max(1, nrows) * 3),
-        squeeze=False,
-    )
-    fig.subplots_adjust(top=0.95, wspace=0.05, hspace=0.1)
-
-    for row_idx, cluster_label in enumerate(unique_clusters):
-        cluster_mask = ad.obs[cluster_key].astype(str) == str(cluster_label)
-        cluster_obs = ad.obs.loc[cluster_mask]
-
-        organoid_ids = cluster_obs["Organoid_ID"].dropna().unique()
-        if len(organoid_ids) == 0:
-            for col_idx in range(ncols):
-                ax[row_idx, col_idx].set_axis_off()
-                ax[row_idx, col_idx].text(
-                    0.5, 0.5, "No organoids",
-                    ha="center", va="center", fontsize=10,
-                    transform=ax[row_idx, col_idx].transAxes,
-                )
-            continue
-
-        sample_n = min(n_organoids, len(organoid_ids))
-        sampled_ids = rng.choice(organoid_ids, size=sample_n, replace=False)
-
-        for col_idx in range(ncols):
-            axis = ax[row_idx, col_idx]
-            axis.set_axis_off()
-
-            if col_idx >= sample_n:
-                continue
-
-            oid = sampled_ids[col_idx]
-            img, mask = load_img_mask_by_UID(
-                oid,
-                ad.uns["ome_zarr_dict"],
-                ad.uns["table_name"],
-                ad.uns["label_name"],
-                pyramid_level,
-                channel,
-            )
-
-            img = np.asarray(img).copy()
-            mask = np.asarray(mask)
-            img[mask == 0] = 0
-
-            axis.imshow(img, interpolation="nearest", aspect="auto", cmap="magma")
-            axis.text(
-                x=0.05,
-                y=0.93,
-                s=str(cluster_label),
-                fontsize=12,
-                transform=axis.transAxes,
-                ha="left",
-                color="white",
-            )
-
-    if save_plot:
-        out_dir = plot_save_dir if plot_save_dir is not None else ad.uns["plot_dir"]
-        save_fig(fig, out_dir, "4Trajectory_OrganoidsPerCluster")
-
-    return fig
-
 
 def run_slingshot(
     ad,
@@ -1172,7 +1089,7 @@ def run_slingshot(
     ad = ad.copy()
 
     clusters_raw = ad.obs[cluster_key]
-    if pd.api.types.is_categorical_dtype(clusters_raw):
+    if isinstance(clusters_raw.dtype, pd.CategoricalDtype):
         clusters = clusters_raw.copy()
     else:
         str_labels = clusters_raw.astype(str)
@@ -1373,8 +1290,8 @@ def knn_label_transfer(
 
     if copy:
         ad_out = adata_target.copy()
-        ad_out.obs[target_obs_key] = pd.Categorical(y_pred) if pd.api.types.is_categorical_dtype(adata_ref.obs[label_key]) else y_pred
+        ad_out.obs[target_obs_key] = pd.Categorical(y_pred) if isinstance(adata_ref.obs[label_key].dtype, pd.CategoricalDtype) else y_pred
         return ad_out
     else:
-        adata_target.obs[target_obs_key] = pd.Categorical(y_pred) if pd.api.types.is_categorical_dtype(adata_ref.obs[label_key]) else y_pred
+        adata_target.obs[target_obs_key] = pd.Categorical(y_pred) if isinstance(adata_ref.obs[label_key].dtype, pd.CategoricalDtype) else y_pred
         return None

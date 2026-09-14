@@ -72,16 +72,33 @@ def load_img_mask_by_UID(UID, stainings, experiment_setup, ome_zarr_dict, table_
 
     # Parse round and marker from channel_str
     if "__" in channel_str:
-        round, marker = channel_str.split("__", 1)
-        round = round[1:]  # Remove leading 'R'
+        round_str, marker = channel_str.split("__", 1)
+        round_str = round_str[1:]  # Remove leading 'R'
     else:
         raise ValueError(f"Channel string '{channel_str}' is not in expected format 'R#__MARKER'")
 
-    # Find the channel index for the requested channel_str
-    channel_idx = list(stainings[experiment_setup[bc][well][1]][round]).index(marker)
+    # Find the channel index for the requested channel_str. get_stainings returns the stains
+    # indexed by imaging channel (position i == channel i+1, "" where nothing is imaged), so
+    # .index() gives the 0-based index into the image channel axis directly.
+    ab_key = experiment_setup[bc][well][1]
+    mix_stains = stainings.get(ab_key)
+    if not isinstance(mix_stains, dict):
+        raise KeyError(
+            f"Antibody mix '{ab_key}' has no round-aware staining entry; expected "
+            f"{{round: [stains by channel]}} but got {type(mix_stains).__name__}."
+        )
+    stains_round = mix_stains.get(round_str)
+    if stains_round is None:
+        raise KeyError(f"Mix '{ab_key}' has no round '{round_str}' (has {sorted(mix_stains)}).")
+    if marker not in stains_round:
+        raise KeyError(
+            f"Stain '{marker}' not found in mix '{ab_key}' round {round_str} "
+            f"({[s for s in stains_round if s]})."
+        )
+    channel_idx = list(stains_round).index(marker)
 
     # load plate ov for the requested round
-    plate_channel = get_plate_for_round(plate, round)
+    plate_channel = get_plate_for_round(plate, round_str)
     well_names = plate_channel.get_names()
     if well not in well_names:
         raise KeyError(f"Well {well} not found in barcode {bc}.")
@@ -111,7 +128,7 @@ def load_img_mask_by_UID(UID, stainings, experiment_setup, ome_zarr_dict, table_
 
 
 
-def segmentation_fidelity_check(ome_zarrs_dict, channel, channel_color, channel_range, n, label_name, alpha, pyramid_lvl_plot=4):
+def segmentation_fidelity_check(ome_zarrs_dict, channel, channel_color, channel_range, n, label_name, alpha, pyramid_lvl_plot=4, seed=0):
     """
     Plot randomly selected images and their corresponding segmentation masks from OME-Zarr plates.
 
@@ -131,14 +148,18 @@ def segmentation_fidelity_check(ome_zarrs_dict, channel, channel_color, channel_
         Opacity (0-1) used for non-zero label regions in the overlay.
     pyramid_lvl_plot : int, default=4
         Pyramid level to load for both image and label.
+    seed : int, default=0
+        Random seed, so the same wells are shown on re-runs.
     """
-    
+
+    rng = random.Random(seed)
+
     # Loop over barcodes
     for barcode in ome_zarrs_dict:
-        
+
         wells_in_bc = ome_zarrs_dict[barcode].names
-        # Get random wells
-        wells = random.sample(ome_zarrs_dict[barcode].names, n)
+        # Get random wells (random.sample raises if n exceeds the number of wells)
+        wells = rng.sample(list(wells_in_bc), min(n, len(wells_in_bc)))
 
         # Loop over wells
         for well in wells:
@@ -159,8 +180,7 @@ def segmentation_fidelity_check(ome_zarrs_dict, channel, channel_color, channel_
                 ax.set_axis_off()
                 continue
 
-            rng = np.random.default_rng()
-            colors = rng.random((n_max + 1, 4))
+            colors = np.random.default_rng(seed).random((n_max + 1, 4))
             colors[0] = (0, 0, 0, 0)
             colors[1:, 3] = alpha
             cmap = mpl.colors.ListedColormap(colors)
@@ -169,33 +189,6 @@ def segmentation_fidelity_check(ome_zarrs_dict, channel, channel_color, channel_
             plt.show()
 
 
-
-def plot_well(ome_zarrs_dict, barcode, well, channels, channel_colors, channel_ranges, label_name, pyramid_lvl_plot=4):
-    """
-    Plot a specific well from the OME-ZARR files.
-
-    Parameters:
-    - ome_zarrs_dict (dict): Dictionary containing OME-ZARR files.
-    - barcode (str): Barcode of the well to plot.
-    - well (str): Well identifier to plot.
-    - channels (list): List of channels to plot.
-    - channel_colors (list): List of colors for each channel.
-    - channel_ranges (list): List of ranges for each channel.
-    - label_name (str): Name of the label to plot.
-    - pyramid_lvl_plot (int): Pyramid level to plot.
-    """
-    ome_zarrs_dict[barcode][ome_zarrs_dict[barcode].names.index(well)].plot(
-        label_name=label_name, 
-        pyramid_level=pyramid_lvl_plot, 
-        channels=channels, 
-        channel_colors=channel_colors, 
-        channel_ranges=channel_ranges,
-        fig_width_inch=15, 
-        fig_height_inch=15,
-        scalebar_micrometer = 100,
-        show_scalebar_label=True,
-        title=f"{barcode} - {well}"
-    )
 
 
 def plot_random_organoids_per_cluster(
@@ -280,7 +273,7 @@ def plot_random_organoids_per_cluster(
     if len(all_ids) == 0:
         raise ValueError("ad.obs.index is empty; no organoids available to plot.")
     obs_clusters = ad.obs.loc[all_ids, cluster_key]
-    if not pd.api.types.is_categorical_dtype(obs_clusters):
+    if not isinstance(obs_clusters.dtype, pd.CategoricalDtype):
         obs_clusters = obs_clusters.astype(str).astype("category")
     clusters = list(obs_clusters.cat.categories)
     if not clusters:

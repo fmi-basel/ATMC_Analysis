@@ -9,7 +9,7 @@ from natsort import natsorted
 from skan import Skeleton, summarize
 from IPython.display import display
 import matplotlib.pyplot as plt
-from scipy.ndimage import label
+from scipy.ndimage import label, mean as ndi_mean
 from tqdm.notebook import tqdm
 import seaborn as sns
 import pandas as pd
@@ -25,7 +25,8 @@ import math
 import cv2
 import os
 
-from Functions.Fcts_Base import find_staining_in_ABs, find_barcodes_with_day, save_adata
+from Functions.Fcts_Base import (find_staining_in_ABs, find_barcodes_with_condition, save_adata,
+                                 _layout_file, get_plate_folder_hints, resolve_barcode_folders)
 from Functions.Fcts_Plotting import load_img_mask_by_UID
 
 # Disable pandas performance warnings
@@ -73,16 +74,31 @@ def make_experiment(source, folder, layout_sheets = ["MediumLayout", "StainingLa
         {barcode: {well: [medium, staining, line, other]}}
     Only wells with information in *all* sheets are included (all-NaN wells are omitted, error if mixed NaN/values).
 
+    Each barcode is also resolved to exactly one OME-Zarr folder in `folder`, using the
+    optional 'Folder:' cells in the layout file (see resolve_barcode_folders). The
+    resulting {barcode: folder} mapping is printed and returned; pass it on in place of
+    the plain folder list so that no downstream step has to pair the two by order.
+
     Parameters
     ----------
     source : str
         Path to a directory containing the Excel file that describes the experiment layout.
+    folder : list of str
+        Candidate OME-Zarr folders, e.g. from find_zarr_dirs.
     layout_sheets : list of str, optional
         The names of the worksheet tabs to extract (default: ["MediumLayout", "StainingLayout", "LineLayout", "OtherLayout"]).
+
+    Returns
+    -------
+    result : dict
+        {barcode: {well: [medium, staining, line, other]}}
+    barcodes : list of str
+    folder_map : dict
+        {barcode: OME-Zarr folder path}
     """
 
 
-    filename = glob.glob(source+'/Layout*.xlsx')[0]
+    filename = _layout_file(source)
 
     def extract_sheet_plates(df):
         plates = {}
@@ -197,10 +213,17 @@ def make_experiment(source, folder, layout_sheets = ["MediumLayout", "StainingLa
                     )
                 result[barcode][well] = values
 
-    display_experiment_setup(result, folder)
     barcodes = list(result.keys())
 
-    return result, barcodes
+    folder_map = resolve_barcode_folders(
+        barcodes,
+        folder,
+        hints=get_plate_folder_hints(source, layout_sheets=layout_sheets),
+    )
+
+    display_experiment_setup(result, folder_map)
+
+    return result, barcodes, folder_map
 
 
 def display_experiment_setup(experiment, folder):
@@ -209,6 +232,8 @@ def display_experiment_setup(experiment, folder):
 
     Parameters:
     - experiment (dict): Experiment setup dictionary.
+    - folder (dict or list): {barcode: folder} mapping (preferred), or a folder list
+      paired by position (legacy).
     """
     # Extract row and col names
     for i, barcode in enumerate(experiment.keys()):
@@ -225,7 +250,7 @@ def display_experiment_setup(experiment, folder):
         for well in current_plate.keys():
             df_hm.loc[well[0], well[1:]] = current_plate[well]
         print("\n\nPlate-Barcode: %s"%barcode)
-        print("Source folder: %s"%folder[i])
+        print("Source folder: %s"%(folder[barcode] if isinstance(folder, dict) else folder[i]))
         display(df_hm)
     
     return None
@@ -274,22 +299,6 @@ def apply_threshold_changes(thresholds_raw_by_round, thresholds_by_round, thresh
 
     return thresholds_raw_by_round, thresholds_by_round
 
-def dict_add_feat(d, feat_name, value):
-    """
-    Add a feature and its value to a dictionary if its already in there. If not, add the value as a list with the feat_name as a new key.
-
-    Parameters:
-    - d (dict): Dictionary to which the feature and value will be added.
-    - feat_name (str): Name of the feature.
-    - value: Value of the feature.
-    """
-    if feat_name in d.keys():
-        d[feat_name].append(value)
-    else:
-        d[feat_name] = [value]
-
-    return d
-
 
 def get_max_inscribed_circle(image, radius_multiplier, value):
     """
@@ -302,14 +311,19 @@ def get_max_inscribed_circle(image, radius_multiplier, value):
     Derived from Lei Yang, https://gist.github.com/DIYer22/f82dc329b27c2766b21bec4a563703cc
     """
     
-    dist_map = cv2.distanceTransform(image.astype(np.uint8), cv2.DIST_L2, cv2.DIST_MASK_PRECISE)
+    # Binarise explicitly: a bool mask would make np.zeros_like() bool (so `value=255`
+    # collapses to True and the ==255 touch test in define_center_touching_branches never
+    # fires), and a uint16 label image with an id >= 256 would wrap to 0 under astype(uint8).
+    binary = (np.asarray(image) != 0).astype(np.uint8)
+
+    dist_map = cv2.distanceTransform(binary, cv2.DIST_L2, cv2.DIST_MASK_PRECISE)
     _, radius, _, center = cv2.minMaxLoc(dist_map)
 
     # Create a mask with the same shape as the image
-    mask_circle = np.zeros_like(image[:, :])
+    mask_circle = np.zeros(binary.shape[:2], dtype=np.uint8)
 
     # Generate a circular mask using the center and radius*radius_multiplier
-    y_range, x_range = np.ogrid[:image.shape[0], :image.shape[1]]
+    y_range, x_range = np.ogrid[:binary.shape[0], :binary.shape[1]]
     mask_circle[(x_range - center[0])**2 + (y_range - center[1])**2 <= (radius*radius_multiplier)**2] = value
     
     return mask_circle, radius, center
@@ -552,20 +566,9 @@ def draw_line(image, start_coords, end_coords):
     return image_with_line
 
 
-def find_indices_except_two_highest(lst):
-    """
-    Find indices of elements in a list, excluding the indices of the two highest values.
 
-    Parameters:
-    - lst (list): The input list.
-    """
-       
-    sorted_indices = sorted(range(len(lst)), key=lambda i: lst[i])  # Sort the indices based on the values
-    result_indices = sorted_indices[:-2]  # Retrieve all indices except the last two (highest values)
-    return result_indices
-
-
-def skeleton_feats(images, row_data, OID, spacing, sigma_skeleton, radius_multiplier=0.5):
+def skeleton_feats(images, row_data, OID, spacing, sigma_skeleton, radius_multiplier=0.5,
+                   n_angle_determination=50):
     """
     Extracts skeleton-based features from the binary mask image and updates the results dictionary.
 
@@ -578,9 +581,12 @@ def skeleton_feats(images, row_data, OID, spacing, sigma_skeleton, radius_multip
     - sigma_skeleton (float): Sigma for Gaussian blur prior to skeletonization.
     - radius_multiplier (float, optional): Multiplier applied to the max inscribed circle radius 
       for feature calculation. Default is 0.5.
+    - n_angle_determination (int, optional): Number of pixels used to estimate the direction of
+      each branch when elongating it to the mask border. Default is 50.
     """
     mask = images["Mask"]
-    _, _, _, _, crypt_number, crypt_length_total, longest_crypt = extract_skeleton_features(mask, spacing, sigma_skeleton, radius_multiplier)
+    _, _, _, _, crypt_number, crypt_length_total, longest_crypt = extract_skeleton_features(
+        mask, spacing, sigma_skeleton, radius_multiplier, n_angle_determination)
     row_data["crypt_count"] = crypt_number
     row_data["crypt_length_total"] = crypt_length_total
     row_data["crypt_length_max"] = longest_crypt
@@ -598,13 +604,18 @@ def extract_skeleton_features(image, spacing, sigma_skeleton=3, radius_multiplie
     - radius_multiplier (float, optional): Multiplier for radius when computing the maximum inscribed circle. Default is 0.5.
     - n_angle_determination (int, optional): Number of pixels used to determine the elongation angle of skeleton endpoints. Default is 50.
     """
-    blurred_image = filters.gaussian(image, sigma=sigma_skeleton)
-    skeleton = morphology.skeletonize(blurred_image, method="lee")
-    mask_circle, radius, center = get_max_inscribed_circle(image, radius_multiplier=radius_multiplier, value=255)
+    # Binarise, blur, then re-threshold. filters.gaussian rescales integer input by the
+    # dtype range (a uint16 label mask of 0/1 peaks at ~1.5e-5) and skeletonize() binarises
+    # with `!= 0`, so blurring without re-thresholding skeletonises a mask dilated by about
+    # 4*sigma rather than a smoothed one - which swallows exactly the protrusions being measured.
+    binary = np.asarray(image).astype(bool)
+    blurred_image = filters.gaussian(binary.astype(float), sigma=sigma_skeleton)
+    skeleton = morphology.skeletonize(blurred_image > 0.5, method="lee")
+    mask_circle, radius, center = get_max_inscribed_circle(binary, radius_multiplier=radius_multiplier, value=255)
     skeleton[mask_circle.astype(bool)] = 0
 
     if np.sum(skeleton.astype(bool)) > 2:
-        skeleton_data = summarize(Skeleton(skeleton))
+        skeleton_data = summarize(Skeleton(skeleton), separator="-")
         skeleton_data = skeleton_data[skeleton_data["branch-type"] != 2]
         elongated_skeleton = np.copy(skeleton)
         skeleton_int = np.copy(skeleton)
@@ -620,13 +631,13 @@ def extract_skeleton_features(image, spacing, sigma_skeleton=3, radius_multiplie
                 skeleton_int[adj_y, adj_x] = 0
                 adj_y, adj_x, _ = find_adjacent_nonzero_pixel((adj_y, adj_x), skeleton_int)
             deg = calculate_angle((adj_x, adj_y), (x, y))
-            x_end, y_end = calculate_endpoint((x, y), deg, image)
+            x_end, y_end = calculate_endpoint((x, y), deg, binary)
             skeleton_data.loc[row, "x_end"] = x_end
             skeleton_data.loc[row, "y_end"] = y_end
             elongated_skeleton = draw_line(elongated_skeleton, (x, y), (x_end, y_end))
 
         # Re-calculate features after elongation
-        skeleton_data = summarize(Skeleton(elongated_skeleton))
+        skeleton_data = summarize(Skeleton(elongated_skeleton), separator="-")
         skeleton_data = skeleton_data[skeleton_data["branch-type"] != 2]
         skeleton_data = define_center_touching_branches(skeleton_data, mask_circle)
         skeleton_data = skeleton_data[~((skeleton_data["branch-type"] == 1) & (skeleton_data["Touching"] == 1))]
@@ -698,7 +709,11 @@ def test_skeletonization(barcodes, stainings, experiment_setup, ome_zarrs_dict, 
         while len(sampled_masks) < n and n_attempts < 5*n:
             mask_candidate = random.choice(masks_lst)
             bc, well, _ = mask_candidate.rsplit("-", 2)
-            staining_dummy = "R0__"+stainings[experiment_setup[bc][well][1]]["0"][0]
+            stain0 = first_stain_for_round(stainings, experiment_setup[bc][well][1], 0)
+            if stain0 is None:
+                n_attempts += 1
+                continue
+            staining_dummy = "R0__" + stain0
             _, mask_img = load_img_mask_by_UID(mask_candidate, stainings, experiment_setup, ome_zarrs_dict, table_name, label_name,
                                                pyramid_level, staining_dummy)
             if np.max(measure.label(mask_img.astype(bool))) == 1:
@@ -713,12 +728,13 @@ def test_skeletonization(barcodes, stainings, experiment_setup, ome_zarrs_dict, 
 
         for i, mask in enumerate(sampled_masks):
             bc, well_id, obj_id = mask.rsplit("-", 2)
-            staining_dummy = "R0__"+stainings[experiment_setup[bc][well_id][1]]["0"][0]
+            staining_dummy = "R0__" + first_stain_for_round(stainings, experiment_setup[bc][well_id][1], 0)
             spacing = ome_zarrs_dict[barcode][well_names.index(well_id)].get_scale(pyramid_level)[-1]
             _, image = load_img_mask_by_UID(mask, stainings, experiment_setup, ome_zarrs_dict, table_name, label_name,
                                                pyramid_level, staining_dummy)
-            image = image.astype(np.uint8)
-            image[image != 0] = 255
+            # Binarise before narrowing the dtype: astype(uint8) on a uint16 label image
+            # wraps ids that are multiples of 256 to 0, blanking those objects.
+            image = (np.asarray(image) != 0).astype(np.uint8) * 255
             skeleton, mask_circle, radius, center, crypt_count, crypt_length_total, longest_crypt = \
                 extract_skeleton_features(image, spacing, sigma_skeleton, radius_multiplier, n_angle_determination)
             image_plot = np.copy(image)
@@ -735,46 +751,6 @@ def test_skeletonization(barcodes, stainings, experiment_setup, ome_zarrs_dict, 
         plt.tight_layout()
         plt.show()
 
-
-def image_preprocessing(stainings, experiment_setup, images, OID, thresholds, sigma = 3):
-    """
-    Preprocess images by blurring them with a gaussian kernel, setting values outside the mask to 0, and thresholding image based on stain-specific mask.
-
-    Parameters:
-    - stainings (dict): Dictionary mapping staining indices to stain names.
-    - experiment_setup (dict): Dictionary containing experimental setup information.
-    - images (dict): Dictionary of image data.
-    - OID (str): Unique organoid ID.
-    - thresholds (dict): Dictionary containing staining-specific thresholds.
-    - sigma (int): Sigma parameter for Gaussian blur.
-    """
-        
-    # Go through channels
-
-    for channel in range(len(stainings[experiment_setup["-".join(OID.split("-")[:-2])][OID.split("-")[-2]][1]])):
-        
-
-
-        # Load image as deepcopy
-        image = copy.deepcopy(images["C0"+str(channel+1)])
-
-        # Gaussian blur
-        image = filters.gaussian(image, sigma = sigma, preserve_range=True)
-
-        # Set values outside mask to 0
-        image[~images["Mask"].astype(bool)] = 0
-
-        # Get threshold for staining
-        staining = stainings[experiment_setup["-".join(OID.split("-")[:-2])][OID.split("-")[-2]][1]][channel]
-        threshold = thresholds[staining][2]
-
-        # Set everything under stain-specific threshold to 0
-        image[image<=threshold] = 0
-
-        # Save as mask
-        images[f"C0{channel+1}_Mask"] = image.astype(bool)
-        
-    return images
 
 
 def get_border_fraction(mask, row_data, OID):
@@ -1045,6 +1021,7 @@ def intensity_feat_calc(
     staining,
     OID,
     quantiles_to_calc,
+    spacing,
     include_thresholded: bool = True,
     include_substructure: bool = True,
 ):
@@ -1052,8 +1029,10 @@ def intensity_feat_calc(
     Calculate intensity-based features for a staining channel within a segmented object.
 
     Parameters:
-    - include_thresholded: if False, do NOT compute any _T_ features (incl. T-quantiles, potency, area_T).
-    - include_substructure: if False, do NOT run Otsu + connected component substructure analysis.
+    - spacing: physical pixel size, used to report areas in the same units as every other
+      area feature (um^2) rather than in pixels.
+    - include_thresholded: if False, do NOT compute any _T_ features (incl. T-quantiles, potency).
+    - include_substructure: if False, do NOT run the connected-component substructure analysis.
     """
 
     mask_bool = mask.astype(bool)
@@ -1093,39 +1072,34 @@ def intensity_feat_calc(
             else:
                 row_data[f"{staining}_T_Q{q_name}"] = 0
 
-        # Potency: mean intensity * area of T (thresholded mask)
-        area_T = int(np.sum(mask_chan_bool))
-        row_data[f"{staining}_area_T"] = area_T
-        row_data[f"{staining}_potency"] = row_data[f"{staining}_mean"] * area_T
+        # Potency: mean intensity * thresholded area. `{staining}_area_T` is already set by
+        # channel_mask_feat_calc in um^2, like every other area feature; writing a raw pixel
+        # count here silently overwrote it with a different unit, so only potency is set.
+        area_T_um2 = float(np.sum(mask_chan_bool)) * float(spacing) ** 2
+        row_data[f"{staining}_potency"] = row_data[f"{staining}_mean"] * area_T_um2
 
     # --- Optional: substructure analysis ---
     if include_substructure:
-        img_speckles = np.copy(img)
-        img_speckles[mask_bool] = 0
-        labeled_image, num_speckles = label(img_speckles)
+        # Substructures are the connected components of the thresholded signal INSIDE the
+        # object. The previous version zeroed the pixels inside the mask and labelled the
+        # raw image, so it measured connected background outside the organoid; and because
+        # scipy.ndimage.label treats every non-zero pixel as foreground, that background
+        # collapsed into a single component covering the whole crop.
+        labeled_image, num_speckles = label(mask_chan_bool)
 
-        filtered_speckles = np.zeros_like(labeled_image, dtype=int)
-        current_label = 1
-
-        for i in range(1, num_speckles + 1):
-            speckle_mask = labeled_image == i
-            filtered_speckles[speckle_mask] = current_label
-            current_label += 1
-
-        remaining_labels = np.unique(filtered_speckles)
-        remaining_labels = remaining_labels[remaining_labels != 0]
-
-        speckle_sizes = []
-        speckle_intensities = []
-
-        for label_id in remaining_labels:
-            speckle_mask = filtered_speckles == label_id
-            speckle_sizes.append(int(np.sum(speckle_mask)))
-            speckle_intensities.append(float(np.mean(img[speckle_mask])))
-
-        row_data[f"{staining}_substructures_size"] = float(np.mean(speckle_sizes)) if speckle_sizes else 0
-        row_data[f"{staining}_substructures_intensity"] = float(np.mean(speckle_intensities)) if speckle_intensities else 0
-        row_data[f"{staining}_substructures_count"] = int(len(speckle_sizes))
+        if num_speckles > 0:
+            idx = np.arange(1, num_speckles + 1)
+            # bincount/ndi_mean give per-component size and intensity in two passes; the
+            # previous per-component boolean comparison was O(n_components * image size).
+            sizes_px = np.bincount(labeled_image.ravel(), minlength=num_speckles + 1)[1:]
+            intensities = np.atleast_1d(ndi_mean(img, labels=labeled_image, index=idx))
+            row_data[f"{staining}_substructures_size"] = float(np.mean(sizes_px)) * float(spacing) ** 2
+            row_data[f"{staining}_substructures_intensity"] = float(np.mean(intensities))
+            row_data[f"{staining}_substructures_count"] = int(num_speckles)
+        else:
+            row_data[f"{staining}_substructures_size"] = 0.0
+            row_data[f"{staining}_substructures_intensity"] = 0.0
+            row_data[f"{staining}_substructures_count"] = 0
 
     return row_data
 
@@ -1230,6 +1204,14 @@ def build_well_round_map_multi(plate, rounds: set[int]) -> dict[tuple[str, int],
 
 
 
+def first_stain_for_round(stainings: dict, ab_key: str, round_id: int) -> str | None:
+    """First channel that actually carries a stain for this mix/round, or None."""
+    for stain in get_stains_for_round(stainings, ab_key, round_id):
+        if stain:
+            return stain
+    return None
+
+
 def get_stains_for_round(stainings: dict, ab_key: str, round_id: int) -> list[str]:
     v = stainings.get(ab_key, [])
     round_id = str(round_id)
@@ -1275,6 +1257,7 @@ def morphology_features(
     spacing,
     sigma_skeleton,
     radius_multiplier,
+    n_angle_determination: int = 50,
     include_moments: bool = True,
     include_skeleton: bool = True,
 ):
@@ -1283,7 +1266,8 @@ def morphology_features(
     row_data = get_border_fraction(mask, row_data, OID)
 
     if include_skeleton:
-        row_data = skeleton_feats({"Mask": mask}, row_data, OID, spacing, sigma_skeleton, radius_multiplier)
+        row_data = skeleton_feats({"Mask": mask}, row_data, OID, spacing, sigma_skeleton,
+                                  radius_multiplier, n_angle_determination)
     else:
         # Ensure skeleton-derived features are absent
         row_data.pop("crypt_count", None)
@@ -1326,14 +1310,30 @@ def intensity_features_for_round(
     mask_bool = mask.astype(bool)
 
     for ch_idx, stain in enumerate(stain_names):
-        if ch_idx >= img_stack.shape[0]:
+        # stain_names is indexed by imaging channel: "" means no stain is imaged on that
+        # channel (brightfield, secondary, or simply unused), so skip it without shifting
+        # the channels that follow.
+        if not stain:
             continue
+        if ch_idx >= img_stack.shape[0]:
+            raise ValueError(
+                f"{OID}: round {round_id} declares stain '{stain}' on imaging channel "
+                f"{ch_idx + 1}, but the image has only {img_stack.shape[0]} channel(s). "
+                "Check the 'Imaging Channel' numbers in the staining layout."
+            )
 
         staining_key = f"R{int(round_id)}__{stain}"
 
         img = img_stack[ch_idx, 0]
         img = np.pad(img, pad_width=20, mode="constant", constant_values=0)
-        
+
+        if img.shape != mask_bool.shape:
+            raise ValueError(
+                f"{OID}: round {round_id} image has shape {img.shape} but the "
+                f"segmentation-round mask has shape {mask_bool.shape}. The rounds are "
+                "probably at different pixel sizes or are not on the same grid."
+            )
+
         # Smooth and mask
         img_proc = filters.gaussian(img, sigma=sigma, preserve_range=True)
         img_proc[~mask_bool] = 0
@@ -1362,6 +1362,7 @@ def intensity_features_for_round(
             staining_key,
             OID,
             quantiles_to_calc=quantiles_to_calc,
+            spacing=spacing,
             include_thresholded=include_thresholded,
             include_substructure=include_substructure,
         )
@@ -1386,19 +1387,35 @@ def intensity_features_for_round(
 
 
 def pearson_features_from_vectors(vectors: dict[str, np.ndarray]) -> dict:
+    """Pairwise Pearson correlation between every (round, stain) intensity vector.
+
+    All vectors are the same object's pixels under the same mask, so they can be stacked
+    and correlated in one pass instead of calling np.corrcoef once per pair - which matters
+    because the number of pairs grows quadratically with rounds x channels.
+    """
     out = {}
     keys = sorted(vectors.keys())
+    if len(keys) < 2:
+        return out
 
-    for k1, k2 in itertools.combinations(keys, 2):
-        v1 = vectors[k1]
-        v2 = vectors[k2]
+    sizes = {int(np.asarray(vectors[k]).size) for k in keys}
+    if len(sizes) != 1 or 0 in sizes:
+        # Ragged or empty (should not happen for one object) - fall back to pairwise.
+        for k1, k2 in itertools.combinations(keys, 2):
+            v1, v2 = np.asarray(vectors[k1]), np.asarray(vectors[k2])
+            ok = v1.size and v2.size and v1.size == v2.size and np.std(v1) and np.std(v2)
+            out[f"{k1}--{k2}_PearsonR"] = float(np.corrcoef(v1, v2)[0, 1]) if ok else np.nan
+        return out
 
-        if v1.size == 0 or v2.size == 0 or np.std(v1) == 0 or np.std(v2) == 0:
-            r = np.nan
-        else:
-            r = float(np.corrcoef(v1, v2)[0, 1])
+    matrix = np.vstack([np.asarray(vectors[k], dtype=float) for k in keys])
+    stds = matrix.std(axis=1)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        corr = np.atleast_2d(np.corrcoef(matrix))
 
-        out[f"{k1}--{k2}_PearsonR"] = r
+    for i, j in itertools.combinations(range(len(keys)), 2):
+        # A constant channel has no correlation defined; report NaN rather than 0.
+        r = np.nan if (stds[i] == 0 or stds[j] == 0) else float(corr[i, j])
+        out[f"{keys[i]}--{keys[j]}_PearsonR"] = r
 
     return out
 
@@ -1501,9 +1518,21 @@ def estimate_staining_thresholds_multicycle(
     rounds_needed = {round_id, segmentation_round}
     # Build stain → [channel_idx, raw_values, final_threshold] per AB mix for this round
     thresholds = {}
+    channel_source = {}
     for ab_mix in stainings:
         for i, stain in enumerate(get_stains_for_round(stainings, ab_mix, round_id)):
-            thresholds[stain] = [i + 1, [], np.nan]
+            if not stain:
+                continue  # no stain on this imaging channel
+            channel = i + 1  # 1-based imaging channel, matching the layout file
+            if stain in thresholds and thresholds[stain][0] != channel:
+                raise ValueError(
+                    f"Stain '{stain}' is on imaging channel {channel} in mix '{ab_mix}' but on "
+                    f"channel {thresholds[stain][0]} in mix '{channel_source[stain]}' for round "
+                    f"{round_id}. Thresholds are keyed by stain, so a stain must sit on the same "
+                    "channel in every antibody mix of a round."
+                )
+            thresholds[stain] = [channel, [], np.nan]
+            channel_source[stain] = ab_mix
 
     # Collect unique days from experiment setup (index 3 = OtherLayout value)
     days = natsorted({
@@ -1519,11 +1548,11 @@ def estimate_staining_thresholds_multicycle(
     for stain in thresholds:
         ab_mixes = find_staining_in_ABs(stainings, stain)
         for day in days:
-            barcodes_day = find_barcodes_with_day(experiment_setup, day)
+            barcodes_day = find_barcodes_with_condition(experiment_setup, day)
             mask = (
                 ome_zarr_df["Barcode"].isin(barcodes_day)
                 & ome_zarr_df["AB"].isin(ab_mixes)
-                & (ome_zarr_df["Day"] == day)
+                & (ome_zarr_df["Other"] == day)
             )
             if control_condition is not None:
                 mask &= ome_zarr_df["Medium"] == control_condition
@@ -1623,10 +1652,16 @@ def plot_thresholds_multicycle(
     segmentation_round = int(segmentation_round)
     rounds_needed = {round_id, segmentation_round}
 
+    if not dict_org:
+        print("No stains to plot for this round.")
+        return
+
     rows = len(dict_org[list(dict_org.items())[0][0]].keys()) + 1
     cols = len(dict_org.keys())
 
-    fig, ax = plt.subplots(nrows=rows, ncols=cols, figsize=(3 * cols, 3 * rows))
+    # squeeze=False keeps ax 2-D; without it a single stain or single timepoint collapses
+    # the array to 1-D and every ax[row, col] access raises IndexError.
+    fig, ax = plt.subplots(nrows=rows, ncols=cols, figsize=(3 * cols, 3 * rows), squeeze=False)
 
     for i, stain in enumerate(thresholds.keys()):
         if len(thresholds[stain][1]) > 1:
@@ -1714,11 +1749,17 @@ def plot_thresholds_multicycle(
             except Exception:
                 img = np.zeros((200, 200))
                 mask_for_oid = np.zeros_like(img, dtype=bool)
+                boundary = np.zeros_like(img, dtype=bool)
 
+            # An all-False mask (the error path above) makes img[mask_for_oid] empty, which
+            # np.percentile cannot reduce; and vmin is NaN when no threshold was found.
             vmin = thresholds[stain][2]
-            vmax = max(np.percentile(img[mask_for_oid], 99), vmin+1)
+            if not np.isfinite(vmin):
+                vmin = float(img.min())
+            inside = img[mask_for_oid]
+            vmax = max(float(np.percentile(inside, 99)), vmin + 1) if inside.size else vmin + 1
 
-            if np.sum(img) > 0:
+            if np.any(boundary):
                 img[boundary] = max(vmax, img.max())
 
             ax[row, col].imshow(img, vmin=vmin, vmax=vmax, aspect="auto", cmap="inferno")
@@ -1749,13 +1790,20 @@ def extract_features_multicycle(
     rounds_to_extract: list[int] | None = None,
     segmentation_round: int = 0,
     sigma_intensity: float = 3,
+    n_angle_determination: int = 50,
     compute_cross_round_pearson: bool = True,
     do_moments_features: bool = True,
     do_skeleton_features: bool = True,
     do_thresholded_features: bool = True,
     do_substructure_features: bool = True,
     ):
-    """Extract features with multi-round intensity support."""
+    """Extract features with multi-round intensity support.
+
+    `folder` is the {barcode: OME-Zarr folder} mapping returned by make_experiment. A
+    plain list is still accepted and paired by position, but that pairing is unverifiable
+    and silently mislabels whole plates when the sort orders of barcodes and folders
+    differ, so pass the mapping.
+    """
 
     thresholds_by_round = normalize_thresholds(thresholds)
 
@@ -1766,23 +1814,62 @@ def extract_features_multicycle(
 
     rounds_needed = set(rounds_to_extract + [segmentation_round])
 
+    # Validate thresholds up front. A missing or NaN threshold silently turns every
+    # thresholded feature into 0 for every object (`value > nan` is always False), which is
+    # indistinguishable from a genuinely negative stain, so refuse before extracting.
+    if do_thresholded_features or do_substructure_features:
+        used_mixes = {info[1] for wells in experiment_setup.values() for info in wells.values()}
+        unusable = set()
+        for r in rounds_to_extract:
+            thr_r = thresholds_by_round.get(int(r), {})
+            for ab in used_mixes:
+                for stain in get_stains_for_round(stainings, ab, r):
+                    if not stain:
+                        continue
+                    value = thr_r.get(stain)
+                    if value is None:
+                        unusable.add(f"  round {r}, mix {ab}, stain {stain}: no threshold")
+                    elif not np.isfinite(value):
+                        unusable.add(f"  round {r}, mix {ab}, stain {stain}: threshold is {value}")
+        if unusable:
+            raise ValueError(
+                "Thresholded and/or substructure features were requested, but these stains "
+                "have no usable threshold:\n" + "\n".join(sorted(unusable)) +
+                "\n\nRe-run the threshold estimation cell, set the values manually with "
+                "apply_threshold_changes, or disable do_thresholded_features and "
+                "do_substructure_features."
+            )
+
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%Hh%Mmin%Ss")
 
     for subfolder in ["1_Scripts", "2_Tables", "3_Plots", "4_Results"]:
         os.makedirs(os.path.join(analysis_dir, subfolder), exist_ok=True)
 
     df_total_list = []
+    spacings_seen = {}
 
-    for i, bc in enumerate(ome_zarrs_dict.keys()):
+    for bc in ome_zarrs_dict.keys():
         print(f"Processing barcode: {bc}")
         plate = ome_zarrs_dict[bc]
         m = build_well_round_map_multi(plate, rounds=rounds_needed)
         wells_in_exp = experiment_setup[bc]
-        rows = []    
+        rows = []
+        # Every `continue` below discards a well, an object or a round. Count them so the
+        # run reports what it dropped instead of silently returning a short table.
+        skipped = {
+            "wells: no image in segmentation round": 0,
+            "wells: ROI table missing": 0,
+            "wells: ROI table empty": 0,
+            "objects: mask could not be loaded": 0,
+            "objects: mask not a single connected component": 0,
+            "object-rounds: round image missing": 0,
+            "object-rounds: round image could not be loaded": 0,
+        }
         for well in wells_in_exp.keys():
             print(f"  Processing well: {well}")
             img_seg = m.get((well, segmentation_round))
             if img_seg is None:
+                skipped["wells: no image in segmentation round"] += 1
                 continue
 
             exp_info = wells_in_exp[well]
@@ -1791,6 +1878,7 @@ def extract_features_multicycle(
             table = img_seg.get_table(table_name, as_AnnData = True)
 
             if table is None:
+                skipped["wells: ROI table missing"] += 1
                 continue
 
             if "label" in table.obs.columns:
@@ -1798,9 +1886,15 @@ def extract_features_multicycle(
             table = table.to_df()
 
             if table.empty:
+                skipped["wells: ROI table empty"] += 1
                 continue
 
-            pixel_spacing = img_seg.get_scale(pyramid_level=pyramid_level)[-1]
+            scale = img_seg.get_scale(pyramid_level=pyramid_level)
+            pixel_spacing = scale[-1]
+            if len(scale) >= 2 and not np.isclose(scale[-1], scale[-2]):
+                print(f"    Warning: anisotropic pixels in {bc}/{well} (y={scale[-2]}, "
+                      f"x={scale[-1]}); using x for both axes.")
+            spacings_seen.setdefault(float(pixel_spacing), f"{bc}/{well}")
 
             for row in table.itertuples():
                 row_idx = row.Index
@@ -1818,6 +1912,7 @@ def extract_features_multicycle(
                         lower_right_yx=(lr_y, lr_x),
                     )
                 except Exception:
+                    skipped["objects: mask could not be loaded"] += 1
                     continue
 
                 mask_arr = mask0[label_name][0]
@@ -1825,8 +1920,8 @@ def extract_features_multicycle(
                 mask_for_oid = (mask_arr == int(row_idx)).astype(mask_arr.dtype)
 
                 # Skip multi-label ROIs
-                from skimage import measure
                 if np.max(measure.label(mask_for_oid.astype(bool))) != 1:
+                    skipped["objects: mask not a single connected component"] += 1
                     continue
 
                 row_data = {
@@ -1852,7 +1947,8 @@ def extract_features_multicycle(
                 for r in sorted(rounds_needed):
                     stains_r = get_stains_for_round(stainings, ab_key, r)
                     for ch_i, stain in enumerate(stains_r):
-                        row_data[f"Staining_R{r}_Ch{ch_i+1}"] = stain
+                        if stain:  # "" = no stain imaged on this channel
+                            row_data[f"Staining_R{r}_Ch{ch_i+1}"] = stain
 
                 # Morphology once (segmentation round)
                 row_data = morphology_features(
@@ -1862,6 +1958,7 @@ def extract_features_multicycle(
                     spacing=pixel_spacing,
                     sigma_skeleton=sigma_skeleton,
                     radius_multiplier=radius_multiplier,
+                    n_angle_determination=n_angle_determination,
                     include_moments=do_moments_features,
                     include_skeleton=do_skeleton_features,
                 )
@@ -1871,11 +1968,12 @@ def extract_features_multicycle(
                 for r in rounds_to_extract:
                     img_r_obj = m.get((well, int(r)))
                     if img_r_obj is None:
+                        skipped["object-rounds: round image missing"] += 1
                         continue
 
                     stains_r = get_stains_for_round(stainings, ab_key, r)
-                    if len(stains_r) == 0:
-                        continue
+                    if not any(stains_r):
+                        continue  # this mix images nothing in this round; not an error
 
                     try:
                         img_r = img_r_obj.get_array_by_coordinate(
@@ -1884,6 +1982,7 @@ def extract_features_multicycle(
                             lower_right_yx=(lr_y, lr_x),
                         )
                     except Exception:
+                        skipped["object-rounds: round image could not be loaded"] += 1
                         continue
 
                     thr_r = thresholds_by_round.get(int(r), {})
@@ -1912,14 +2011,19 @@ def extract_features_multicycle(
 
                 rows.append(row_data)
 
+        dropped = {k: v for k, v in skipped.items() if v}
+        print(f"  {bc}: extracted {len(rows)} objects"
+              + ("; skipped " + ", ".join(f"{v} {k}" for k, v in dropped.items()) if dropped else "; nothing skipped"))
+
         if not rows:
             continue
 
         df = pd.DataFrame(rows)
         df = df.drop(columns=[col for col in df.columns if "moments-0-0" in col or "moments_weighted-0-0" in col], errors="ignore")
 
-        # Save per-plate
-        save_path = os.path.join(source, folder[i], f"{result_file_name}_{barcodes[i]}_{timestamp}.csv")
+        # Save per-plate next to the merged table (writing into the .zarr store would
+        # pollute the OME-Zarr and, with positional pairing, the wrong plate's store).
+        save_path = os.path.join(analysis_dir, "2_Tables", f"{result_file_name}_{bc}_{timestamp}.csv")
         df.to_csv(save_path)
         print(f"Saved {bc} results as {save_path}.")
 
@@ -1939,10 +2043,14 @@ def extract_features_multicycle(
         "Organoid_ID", "Barcode", "Well", "Object", "Medium",
         "ABs", "Cell_line", "Other", "PATH", "Experiment_ID",
         'y_micrometer', 'x_micrometer', 'len_y_micrometer',
-        'len_x_micrometer', 'centroid_y_micrometer', 'centroid_x_micrometer'
+        'len_x_micrometer', 'centroid_y_micrometer', 'centroid_x_micrometer',
+        # regionprops 'centroid' is the object's position inside its own crop, so it carries
+        # no phenotype - keep it as metadata instead of feeding it to PCA/UMAP/clustering.
+        'centroid-0', 'centroid-1',
         ]
     
     feats_categorical += [col for col in df_total.columns if col.startswith("Staining_")]
+    feats_categorical = [col for col in feats_categorical if col in df_total.columns]
     feats_numerical = [col for col in df_total.columns if col not in feats_categorical]
 
     ad = anndata.AnnData(
@@ -1954,9 +2062,17 @@ def extract_features_multicycle(
     ad.uns["stainings"] = _stringify_dict_keys(stainings)
     ad.uns["thresholds_by_round"] = _stringify_dict_keys(thresholds_by_round)
     ad.uns["experiment_setup"] = experiment_setup
-    ad.uns["pixel_spacing"] = pixel_spacing
+    if len(spacings_seen) > 1:
+        print(f"Warning: several pixel sizes across wells at pyramid level {pyramid_level}: "
+              + ", ".join(f"{s} ({w})" for s, w in sorted(spacings_seen.items()))
+              + f". Storing {min(spacings_seen)}; area features are per-well correct, but "
+                "anything using ad.uns['pixel_spacing'] assumes one value.")
+    ad.uns["pixel_spacing"] = min(spacings_seen) if spacings_seen else pixel_spacing
     ad.uns["pyramid_level"] = pyramid_level
-    ad.uns["folders"] = folder
+    ad.uns["folders"] = (
+        folder if isinstance(folder, dict)
+        else dict(zip(list(ome_zarrs_dict.keys()), list(folder)))
+    )
     ad.uns["source_dir"] = source
     ad.uns["table_dir"] = os.path.join(analysis_dir, "2_Tables")
     ad.uns["plot_dir"] = os.path.join(analysis_dir, "3_Plots")
@@ -2026,20 +2142,22 @@ def merge_feature_tables_from_zarr(
 
     tables_all = []
 
-    for plate_folder in folder:
+    # `folder` is the {barcode: folder} mapping from make_experiment. A plain list is
+    # resolved here the same way, so that a barcode is never paired with a plate by
+    # sort order (which is unverifiable and mislabels the whole plate when wrong).
+    folder_map = resolve_barcode_folders(
+        list(experiment_setup.keys()),
+        folder,
+        hints=get_plate_folder_hints(source),
+        verbose=not isinstance(folder, dict),
+    )
+
+    for barcode_guess, plate_folder in folder_map.items():
         plate_path = os.path.join(source, plate_folder)
         plate = _load_plate_for_round(plate_path, multiplexing_round)
 
         wells = plate.get_names()
         well_paths = plate.paths
-
-        barcode_guess = None
-        for bc in experiment_setup.keys():
-            if bc in plate_folder:
-                barcode_guess = bc
-                break
-        if barcode_guess is None:
-            barcode_guess = list(experiment_setup.keys())[folder.index(plate_folder)]
 
         meta = experiment_setup[barcode_guess]
 
@@ -2099,7 +2217,7 @@ def merge_feature_tables_from_zarr(
 
     ad_all.uns["stainings"] = _stringify_dict_keys(stainings) if stainings is not None else {}
     ad_all.uns["experiment_setup"] = _stringify_dict_keys(experiment_setup)
-    ad_all.uns["folders"] = folder
+    ad_all.uns["folders"] = folder_map
     ad_all.uns["source_dir"] = source
     ad_all.uns["table_name"] = roi_table_name
     ad_all.uns["label_name"] = label_name

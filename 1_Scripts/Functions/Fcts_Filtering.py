@@ -97,7 +97,8 @@ def filter_rows_by_percentile_bounds(
 
 
 
-def filter_organoids_by(ad, df, feature, values, channel, pyramid_level=1, add_boundary = False):
+def filter_organoids_by(ad, df, feature, values, channel, pyramid_level=1, add_boundary = False,
+                        keep_na = True):
     """
     Filter organoids based on a specified numerical feature range and visualize the removed organoids.
 
@@ -108,24 +109,38 @@ def filter_organoids_by(ad, df, feature, values, channel, pyramid_level=1, add_b
     - values (tuple): Tuple (lower_bound, upper_bound) for filtering bounds.
     - channel (str): Channel for image visualization.
     - pyramid_level (int): Pyramid level of images for visualization.
+    - keep_na (bool): If True (default, matching filter_rows_by_percentile_bounds), objects whose
+      value is NaN are kept. A NaN fails both bound tests, so the previous behaviour dropped
+      them and counted them twice in the printout - and for a stain-specific feature, NaN means
+      "this object's antibody mix does not include that stain", so dropping silently removed
+      every object from the other panels.
     """
     lower_bound, upper_bound = values
 
+    vals = df[feature]
+    is_na = vals.isna()
+
     # Apply filter
-    mask_lower = df[feature] >= lower_bound
-    mask_upper = df[feature] <= upper_bound
+    mask_lower = vals >= lower_bound
+    mask_upper = vals <= upper_bound
     mask = mask_lower & mask_upper
+    if keep_na:
+        mask = mask | is_na
     df_filtered = df[mask]
 
-    n_removed_lower = (~mask_lower).sum()
-    n_removed_upper = (~mask_upper).sum()
+    n_removed_lower = int((~is_na & ~mask_lower).sum())
+    n_removed_upper = int((~is_na & ~mask_upper).sum())
+    n_na = int(is_na.sum())
     print(f"{n_removed_lower} objects removed due to lower boundary ({lower_bound}) of {feature}.")
     print(f"{n_removed_upper} objects removed due to upper boundary ({upper_bound}) of {feature}.")
+    if n_na:
+        print(f"{n_na} objects have no value for {feature} and were "
+              f"{'kept' if keep_na else 'removed'} (keep_na={keep_na}).")
     print(f"{len(df_filtered)} objects remain after filtering.")
 
     # Visualize removed due to lower boundary
     if n_removed_lower > 0:
-        removed_lower = df[~mask_lower].index
+        removed_lower = df[~is_na & ~mask_lower].index
         n_lower = len(removed_lower)
         rows_lower = 1 if n_lower < 9 else min(4, math.ceil(n_lower / 9))
         cols_lower = min(9, n_lower) if rows_lower == 1 else 9
@@ -136,7 +151,7 @@ def filter_organoids_by(ad, df, feature, values, channel, pyramid_level=1, add_b
 
     # Visualize removed due to upper boundary
     if n_removed_upper > 0:
-        removed_upper = df[~mask_upper].index
+        removed_upper = df[~is_na & ~mask_upper].index
         n_upper = len(removed_upper)
         rows_upper = 1 if n_upper < 9 else min(4, math.ceil(n_upper / 9))
         cols_upper = min(9, n_upper) if rows_upper == 1 else 9
@@ -186,18 +201,18 @@ def get_deleted_organoids(ad, df_removed, df_filtered, rows, cols, title, featur
             axes_flat[i].axis('off')
             continue
         OID = OIDs[i]
-        # try:
-        img, mask = load_img_mask_by_UID(OID, ad.uns["stainings"], ad.uns["experiment_setup"], ad.uns["ome_zarr_dict"], ad.uns["table_name"],
-                                        ad.uns["label_name"], pyramid_level, str(channel), add_boundary=add_boundary)
-        img = img.copy()
-        img[~mask.astype(bool)] = 0
-        axes_flat[i].imshow(img, interpolation="nearest", aspect="auto", cmap="magma")
-        axes_flat[i].set_title(f"{OID}\n{feature}: {feature_values[i]:.2f}", fontsize=8)
-        axes_flat[i].axis('off')
-        # except Exception as e:
-        #     axes_flat[i].text(0.5, 0.5, f"Failed to load\n{OID}", ha='center', va='center')
-        #     axes_flat[i].axis('off')
-        #     print(f"Warning: failed to load image for {OID}: {e}")
+        try:
+            img, mask = load_img_mask_by_UID(OID, ad.uns["stainings"], ad.uns["experiment_setup"], ad.uns["ome_zarr_dict"], ad.uns["table_name"],
+                                            ad.uns["label_name"], pyramid_level, str(channel), add_boundary=add_boundary)
+            img = img.copy()
+            img[~mask.astype(bool)] = 0
+            axes_flat[i].imshow(img, interpolation="nearest", aspect="auto", cmap="magma")
+            axes_flat[i].set_title(f"{OID}\n{feature}: {feature_values[i]:.2f}", fontsize=8)
+            axes_flat[i].axis('off')
+        except Exception as e:
+            axes_flat[i].text(0.5, 0.5, f"Failed to load\n{OID}", ha='center', va='center')
+            axes_flat[i].axis('off')
+            print(f"Warning: failed to load image for {OID}: {e}")
 
     plt.tight_layout()
     return fig
@@ -225,11 +240,15 @@ def plot_random_organoids(ad, df_raw, df, feature, rows=10, cols=10, channel="R0
           f"{n_available} objects remain for further analysis.\n")
 
     # Adjust grid size if fewer organoids than requested
+    if n_available == 0:
+        print("No objects remain after filtering; nothing to plot.")
+        return None
+
     if n_available < n_requested:
         print(f"Only {n_available} objects available but grid requires {n_requested}. Adjusting grid size accordingly.")
         n_to_plot = n_available
         # Compute new rows and cols to have a nearly square layout
-        cols = min(cols, n_to_plot)
+        cols = max(1, min(cols, n_to_plot))
         rows = math.ceil(n_to_plot / cols)
     else:
         n_to_plot = n_requested
