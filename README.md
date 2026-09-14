@@ -95,6 +95,13 @@ and the channel each stain was imaged on:
   its own — brightfield and secondary-antibody rows are filtered out, and a layout may simply
   skip a number — leave the gap: the remaining stains keep their true channel. `get_stainings`
   prints which channels were left empty.
+- **The number is relative to that round's own channel axis.** In a multiplexed (4i)
+  acquisition, rounds routinely differ in how many channels they carry and in which order, so
+  the same fluorophore sits at a different index in different rounds. For example, a round
+  imaged as `DAPI, FITC, Texas Red, Cy5` puts Cy5 on channel 4, while a round imaged as
+  `DAPI, Cy5` puts Cy5 on channel **2**. Number each row for the round it belongs to, not by a
+  fixed fluorophore slot. If a number exceeds the channels the round actually has, extraction
+  stops and names the stain and round rather than reading the wrong channel.
 - **A stain must sit on the same channel in every mix of a round.** Thresholds are stored per
   stain, so a conflict raises rather than silently using one mix's channel for the other's images.
 - **`Antibody Mix`** may list several mixes separated by commas to share one row.
@@ -120,6 +127,16 @@ depth where it finds any.
   a mismatch between a round's image and the segmentation mask raises an error naming the object.
 - A **round id is the `image_name` group inside each well**, i.e. the pipeline reads round `1`
   from `<plate>.zarr/<row>/<col>/1/`. Rounds are loaded with `ez_zarr.import_plate(..., image_name="1")`.
+
+**Round ids need not be contiguous.** A plate whose wells contain image groups
+`0, 1, 2, 3, 4, 8, 14, ... 28` is handled as-is; list exactly the ones you want in
+`rounds_to_extract`.
+
+**Scale warning for many rounds.** `compute_cross_round_pearson=True` correlates every pair of
+(round, stain) intensity vectors, which grows quadratically: an 18-round panel with 57 stains
+produces 1,653 correlation columns, about 40% of a ~4,000-column table. Set it to `False`
+unless you need the cross-round correlations, and expect the merged `.csv` to reach tens of GB
+at that width — the `.h5ad` is the practical output.
 
 **`file_ending`** selects which folders count as plates. It defaults to `.zarr`, which picks up
 every plate. Narrow it when a folder holds several variants of the same plates and you want only

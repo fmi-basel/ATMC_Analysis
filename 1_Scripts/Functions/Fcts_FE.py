@@ -76,22 +76,16 @@ def make_experiment(source, folder, layout_sheets = ["MediumLayout", "StainingLa
     resulting {barcode: folder} mapping is printed and returned; pass it on in place of
     the plain folder list so that no downstream step has to pair the two by order.
 
-    Parameters
-    ----------
-    source : str
-        Path to a directory containing the Excel file that describes the experiment layout.
-    folder : list of str
-        Candidate OME-Zarr folders, e.g. from find_zarr_dirs.
-    layout_sheets : list of str, optional
-        The names of the worksheet tabs to extract (default: ["MediumLayout", "StainingLayout", "LineLayout", "OtherLayout"]).
+    Parameters:
+    - source (str): Directory containing the Layout*.xlsx that describes the experiment.
+    - folder (list of str): Candidate OME-Zarr folders, e.g. from find_zarr_dirs.
+    - layout_sheets (list of str): Worksheet tabs to read, in the order their values are
+      stored per well (default Medium, Staining, Line, Other).
 
-    Returns
-    -------
-    result : dict
-        {barcode: {well: [medium, staining, line, other]}}
-    barcodes : list of str
-    folder_map : dict
-        {barcode: OME-Zarr folder path}
+    Returns:
+    - result (dict): {barcode: {well: [medium, staining, line, other]}}
+    - barcodes (list of str): Barcodes present in every sheet, naturally sorted.
+    - folder_map (dict): {barcode: OME-Zarr folder path}
     """
 
 
@@ -108,7 +102,10 @@ def make_experiment(source, folder, layout_sheets = ["MediumLayout", "StainingLa
                 row = df.iloc[j, :]
                 for k, v in enumerate(row):
                     if str(v).strip() == "Barcode:" and (k+1)<ncols:
-                        barcode = str(row[k+1]).strip()
+                        candidate = str(row[k+1]).strip()
+                        # An empty barcode cell is an unused plate block (the templates ship
+                        # with one); skip it instead of creating a plate named "nan".
+                        barcode = None if candidate.lower() in ("", "nan", "none", "nat") else candidate
                         i = j+1
                         break
                 if barcode: break
@@ -139,6 +136,10 @@ def make_experiment(source, folder, layout_sheets = ["MediumLayout", "StainingLa
                 if head_row is not None:
                     break
             if head_row is None:
+                # A barcode with no detectable well grid below it drops the whole plate.
+                # Say so: otherwise the plate silently disappears from the experiment.
+                print(f"Warning: found barcode '{barcode}' but no 1-12 / 1-24 column header "
+                      f"beneath it; this plate block is skipped.")
                 i += 1
                 continue
 
@@ -681,7 +682,8 @@ def pad_to_aspect_ratio(image, target_aspect_ratio = 1.0):
 
 
 def test_skeletonization(barcodes, stainings, experiment_setup, ome_zarrs_dict, ome_zarr_df, table_name, label_name, pyramid_level=0,
-                        n=5, seed=0, sigma_skeleton=3, n_angle_determination=50, radius_multiplier=0.5):
+                        n=5, seed=0, sigma_skeleton=3, n_angle_determination=50, radius_multiplier=0.5,
+                        segmentation_round=0):
     """
     Test the skeletonization process on a set of randomly seletected organoid masks and generate visualizations.
 
@@ -706,13 +708,13 @@ def test_skeletonization(barcodes, stainings, experiment_setup, ome_zarrs_dict, 
         while len(sampled_masks) < n and n_attempts < 5*n:
             mask_candidate = random.choice(masks_lst)
             bc, well, _ = mask_candidate.rsplit("-", 2)
-            stain0 = first_stain_for_round(stainings, experiment_setup[bc][well][1], 0)
+            stain0 = first_stain_for_round(stainings, experiment_setup[bc][well][1], segmentation_round)
             if stain0 is None:
                 n_attempts += 1
                 continue
-            staining_dummy = "R0__" + stain0
+            staining_dummy = f"R{segmentation_round}__{stain0}"
             _, mask_img = load_img_mask_by_UID(mask_candidate, stainings, experiment_setup, ome_zarrs_dict, table_name, label_name,
-                                               pyramid_level, staining_dummy)
+                                               pyramid_level, staining_dummy, segmentation_round=segmentation_round)
             if np.max(measure.label(mask_img.astype(bool))) == 1:
                 if mask_candidate not in sampled_masks:
                     sampled_masks.append(mask_candidate)
@@ -725,10 +727,11 @@ def test_skeletonization(barcodes, stainings, experiment_setup, ome_zarrs_dict, 
 
         for i, mask in enumerate(sampled_masks):
             bc, well_id, obj_id = mask.rsplit("-", 2)
-            staining_dummy = "R0__" + first_stain_for_round(stainings, experiment_setup[bc][well_id][1], 0)
+            staining_dummy = f"R{segmentation_round}__" + first_stain_for_round(
+                stainings, experiment_setup[bc][well_id][1], segmentation_round)
             spacing = ome_zarrs_dict[barcode][well_names.index(well_id)].get_scale(pyramid_level)[-1]
             _, image = load_img_mask_by_UID(mask, stainings, experiment_setup, ome_zarrs_dict, table_name, label_name,
-                                               pyramid_level, staining_dummy)
+                                               pyramid_level, staining_dummy, segmentation_round=segmentation_round)
             # Binarise before narrowing the dtype: astype(uint8) on a uint16 label image
             # wraps ids that are multiples of 256 to 0, blanking those objects.
             image = (np.asarray(image) != 0).astype(np.uint8) * 255
@@ -1210,6 +1213,21 @@ def first_stain_for_round(stainings: dict, ab_key: str, round_id: int) -> str | 
 
 
 def get_stains_for_round(stainings: dict, ab_key: str, round_id: int) -> list[str]:
+    """Return the stains of one antibody mix for one round, indexed by imaging channel.
+
+    Position i of the returned list is the stain on imaging channel i+1, i.e. index i of the
+    OME-Zarr channel axis of *that round*. Channels carrying no stain are "" and must be skipped
+    by callers. Rounds of a multiplexed acquisition often differ in channel count, so a stain's
+    index is only meaningful within its own round.
+
+    Parameters:
+    - stainings (dict): Output of get_stainings, {mix: {round: [stains by channel]}}.
+    - ab_key (str): Antibody mix name.
+    - round_id (int or str): Imaging round.
+
+    Returns:
+    - list of str: Stains by channel, or [] if the mix or round is unknown.
+    """
     v = stainings.get(ab_key, [])
     round_id = str(round_id)
     if isinstance(v, dict):
@@ -1258,6 +1276,26 @@ def morphology_features(
     include_moments: bool = True,
     include_skeleton: bool = True,
 ):
+    """Compute every shape feature of one object from its segmentation mask.
+
+    Morphology is measured once, from the segmentation round, so these feature names carry no
+    round prefix.
+
+    Parameters:
+    - mask (numpy.ndarray): Binary or label mask of a single object.
+    - row_data (dict): Feature dict to update in place.
+    - OID (str): Object identifier, used for bookkeeping.
+    - spacing (float): Physical pixel size, so lengths are um and areas um^2.
+    - sigma_skeleton (float): Gaussian sigma used to smooth the mask before skeletonization.
+    - radius_multiplier (float): Fraction of the max-inscribed-circle radius treated as
+      crypt-free. Lower values make the algorithm sensitive to smaller crypts.
+    - n_angle_determination (int): Pixels used to estimate each branch direction.
+    - include_moments (bool): Also compute regionprops image moments.
+    - include_skeleton (bool): Compute the crypt features; when False they are removed.
+
+    Returns:
+    - row_data (dict): Updated with shape, convex-hull, straight-edge and crypt features.
+    """
     row_data = shape_calc_mask(mask, row_data, OID, spacing, include_moments=include_moments)
     row_data = convex_hull_features(mask, row_data, OID, spacing, min_area_fraction=0.005)
     row_data = get_border_fraction(mask, row_data, OID)
@@ -1809,11 +1847,30 @@ def extract_features_multicycle(
 
     rounds_needed = set(rounds_to_extract + [segmentation_round])
 
+    # Validate that every antibody mix used on a plate is described in the staining layout.
+    # The mix name in the StainingLayout *grid* must match an "Antibody Mix" entry in the
+    # immunostaining *table*; when it does not (e.g. the grid says 2 but the table says AB1),
+    # every intensity feature is silently dropped and the run still "succeeds" with morphology
+    # only, so refuse instead.
+    used_mixes = {info[1] for wells in experiment_setup.values() for info in wells.values()}
+    unknown_mixes = sorted(
+        (str(m) for m in used_mixes if m not in stainings),
+        key=str,
+    )
+    if unknown_mixes:
+        raise ValueError(
+            f"These antibody mixes are used in the plate layout but are not described in the "
+            f"staining layout: {unknown_mixes}.\n"
+            f"Mixes defined in the immunostaining table: {sorted(map(str, stainings))}.\n"
+            "The value in the StainingLayout grid must match the 'Antibody Mix' name in the "
+            "immunostaining table exactly (note that a bare number in the grid is read as a "
+            "number, so '1' does not match 'AB1')."
+        )
+
     # Validate thresholds up front. A missing or NaN threshold silently turns every
     # thresholded feature into 0 for every object (`value > nan` is always False), which is
     # indistinguishable from a genuinely negative stain, so refuse before extracting.
     if do_thresholded_features or do_substructure_features:
-        used_mixes = {info[1] for wells in experiment_setup.values() for info in wells.values()}
         unusable = set()
         for r in rounds_to_extract:
             thr_r = thresholds_by_round.get(int(r), {})
@@ -2246,15 +2303,23 @@ def merge_feature_tables_from_zarr_rounds(
     Default behavior matches 1_FeatureExtraction: keep all objects across rounds and fill missing
     round-specific features with NaN.
 
-    Parameters
-    ----------
-    join
-        How to combine objects across rounds.
-        - 'outer' (default): union of Organoid_IDs across rounds (missing features become NaN)
-        - 'inner': keep only Organoid_IDs present in all rounds
+    Parameters:
+    - source (str), folder (dict or list), experiment_setup (dict), stainings (dict or None),
+      experiment_ID (str): As in merge_feature_tables_from_zarr.
+    - multiplexing_rounds (int or list of int): Round(s) to load.
+    - result_file_name (str), analysis_dir (str or None): Output naming and location.
+    - feature_table_names (str or list of str): Table(s) to read from each well.
+    - roi_table_name (str), label_name (str): Recorded in .uns for later image loading.
+    - file_ending (str): Plate folder suffix.
+    - validate_obs_names (bool): Require identical obs_names across rounds; only sensible
+      with join="inner".
+    - save_merged (bool): Write the merged AnnData to disk.
+    - join (str): How to combine objects across rounds. "outer" (default) takes the union of
+      Organoid_IDs and fills missing round-specific features with NaN; "inner" keeps only
+      objects present in every round.
 
-    validate_obs_names
-        When True, requires identical obs_names (only sensible with join='inner').
+    Returns:
+    - ad_all (anndata.AnnData): One object with every requested round's features.
     """
 
     import anndata as ad

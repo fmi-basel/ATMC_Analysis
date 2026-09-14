@@ -26,22 +26,17 @@ def filter_rows_by_percentile_bounds(
 
     Tagging happens first for all features; filtering happens only after all tags exist.
 
-    Parameters
-    ----------
-    df : pd.DataFrame
-        Input dataframe.
-    features : str | list[str]
-        Feature name(s) to evaluate.
-    lower_q, upper_q : float
-        Quantile bounds in [0, 1]. Example: 0.01 and 0.99.
-    keep_na : bool
-        If True: NaNs do NOT trigger outlier removal (NaNs are kept).
-        If False: NaNs are treated as outliers (row gets flagged).
-    return_details : bool
-        If True: return (df_filtered, df_annotated, bounds_df).
-        If False: return df_filtered.
-    flag_prefix : str
-        Prefix for added flag columns in df_annotated.
+    Parameters:
+    - df (pd.DataFrame): Input dataframe.
+    - features (str or list of str): Feature name(s) to evaluate.
+    - lower_q (float), upper_q (float): Quantile bounds in [0, 1], e.g. 0.01 and 0.99.
+    - keep_na (bool): If True, NaNs do not trigger outlier removal and are kept. If False,
+      NaNs are treated as outliers and the row is flagged.
+    - return_details (bool): If True, also return the annotated frame and the bounds table.
+    - flag_prefix (str): Prefix for the flag columns added to the annotated frame.
+
+    Returns:
+    - df_filtered (pd.DataFrame), or (df_filtered, df_annotated, bounds_df) if return_details.
     """
     if isinstance(features, str):
         features = [features]
@@ -199,7 +194,8 @@ def get_deleted_organoids(ad, df_removed, df_filtered, rows, cols, title, featur
         OID = OIDs[i]
         try:
             img, mask = load_img_mask_by_UID(OID, ad.uns["stainings"], ad.uns["experiment_setup"], ad.uns["ome_zarr_dict"], ad.uns["table_name"],
-                                            ad.uns["label_name"], pyramid_level, str(channel), add_boundary=add_boundary)
+                                            ad.uns["label_name"], pyramid_level, str(channel), add_boundary=add_boundary,
+                                            segmentation_round=ad.uns.get("segmentation_round", 0))
             img = img.copy()
             img[~mask.astype(bool)] = 0
             axes_flat[i].imshow(img, interpolation="nearest", aspect="auto", cmap="magma")
@@ -272,7 +268,8 @@ def plot_random_organoids(ad, df_raw, df, feature, rows=10, cols=10, channel="R0
         OID = removed_OID[i]
         try:
             img, mask = load_img_mask_by_UID(OID, ad.uns["stainings"], ad.uns["experiment_setup"], ad.uns["ome_zarr_dict"], ad.uns["table_name"],
-                                            ad.uns["label_name"], pyramid_level, str(channel), add_boundary=add_boundary)
+                                            ad.uns["label_name"], pyramid_level, str(channel), add_boundary=add_boundary,
+                                            segmentation_round=ad.uns.get("segmentation_round", 0))
             img = img.copy()
             img[mask == 0] = 0
             axes_flat[i].imshow(img, interpolation="nearest", aspect="auto", cmap="magma")

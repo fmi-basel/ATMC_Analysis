@@ -15,6 +15,18 @@ BASE FUNCTIONS
 
 def remove_uns(ad, keys_to_remove):
 
+    """Drop keys from adata.uns if present.
+
+    Used to strip runtime-only entries (the loaded OME-Zarr handles) that must not be written
+    to disk.
+
+    Parameters:
+    - ad (anndata.AnnData): Object to modify in place.
+    - keys_to_remove (list of str): Keys to drop; missing keys are ignored.
+
+    Returns:
+    - ad (anndata.AnnData): The same object.
+    """
     for key in keys_to_remove:
         if key in ad.uns:
             ad.uns.pop(key)
@@ -45,6 +57,18 @@ def infer_barcode_folder_map(ad):
 
 def add_zarr_uns(ad):
 
+    """Re-open the experiment's OME-Zarr plates and attach them to adata.uns for runtime use.
+
+    The barcode to folder mapping is recovered from ad.obs["PATH"] where possible, falling back
+    to ad.uns["folders"]. The attached handles are not serialisable and are stripped again by
+    save_adata.
+
+    Parameters:
+    - ad (anndata.AnnData): Object carrying the extraction configuration in .uns.
+
+    Returns:
+    - ad (anndata.AnnData): The same object, with "ome_zarr_dict" and "ome_zarr_df" in .uns.
+    """
     folder_map = infer_barcode_folder_map(ad)
     folders = folder_map if folder_map else ad.uns["folders"]
     ome_zarr_dict, ome_zarr_df =  extract_ome_zarr_tables(ad.uns["experiment_setup"],ad.uns["source_dir"], folders, ad.uns["table_name"])
@@ -320,7 +344,8 @@ def get_plate_folder_hints(source, layout_sheets=("MediumLayout", "StainingLayou
                     continue
                 label = str(v).strip().lower()
                 if label == "barcode:":
-                    barcode = str(row[k + 1]).strip()
+                    candidate = str(row[k + 1]).strip()
+                    barcode = None if candidate.lower() in ("", "nan", "none", "nat") else candidate
                 elif label in ("folder:", "zarr:", "plate folder:"):
                     folder_hint = str(row[k + 1]).strip()
             if barcode and folder_hint and folder_hint.lower() not in ("nan", "none", ""):
@@ -539,6 +564,21 @@ def extract_ome_zarr_tables(experiment_setup, source, folder, table_name):
                 df['path'] = path
                 converted_dfs.append(df)
 
+        if not converted_dfs:
+            # Every matched well returned no table. Most often the plate was segmented for a
+            # different object type (e.g. nuclei_ROI_table instead of organoids_ROI_table), so
+            # say which plate and what it does have, rather than failing inside pd.concat.
+            try:
+                available = sorted(plate.images[0].get_table_names())
+            except Exception:
+                available = "unknown"
+            raise ValueError(
+                f"Barcode {barcode}: none of the layout wells {sorted(valid_wells)} contain a "
+                f"table called '{table_name}' in {os.path.basename(str(folder_path).rstrip('/'))}. "
+                f"Tables available in that plate: {available}. "
+                "Either this plate was segmented for a different object type, or table_name is wrong."
+            )
+
         plate_df = pd.concat(converted_dfs, ignore_index=False)
         plate_df["Barcode"] = barcode
         plate_df["UID"] = barcode + "-" + plate_df["well"].astype(str) + "-" + plate_df.index.astype(str)
@@ -553,6 +593,11 @@ def extract_ome_zarr_tables(experiment_setup, source, folder, table_name):
         plate_df["Cell_line"] = plate_df["well"].map(lambda w: meta.get(w, empty)[2])
         plate_df["Other"] = plate_df["well"].map(lambda w: meta.get(w, empty)[3])
         all_plate_dfs.append(plate_df)
+
+    if not all_plate_dfs:
+        raise ValueError(
+            f"No plate produced any '{table_name}' rows. Check table_name and the layout wells."
+        )
 
     ome_zarr_df = pd.concat(all_plate_dfs, ignore_index=True)
     ome_zarr_df.index = ome_zarr_df.UID

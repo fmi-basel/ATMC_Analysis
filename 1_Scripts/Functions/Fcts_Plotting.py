@@ -9,7 +9,8 @@ import pandas as pd
 import numpy as np
 import random
 
-def load_img_mask_by_UID(UID, stainings, experiment_setup, ome_zarr_dict, table_name, label_name, pyramid_level, channel_str, add_boundary=False):
+def load_img_mask_by_UID(UID, stainings, experiment_setup, ome_zarr_dict, table_name, label_name,
+                         pyramid_level, channel_str, add_boundary=False, segmentation_round=0):
     """
     Retrieve an image and corresponding mask for a specific entry in an OME-Zarr plate dataset,
     based on a unique identifier (UID) and additional parameters.
@@ -37,11 +38,14 @@ def load_img_mask_by_UID(UID, stainings, experiment_setup, ome_zarr_dict, table_
         raise KeyError(f"Barcode {bc} not found in ome_zarr_dict.")
     plate = ome_zarr_dict[bc]
 
-    well_names = plate.get_names()
+    # The ROI table and the labels live in the segmentation round, which is not necessarily
+    # the round the plate was imported with (ez_zarr defaults to image_name="0").
+    seg_plate = get_plate_for_round(plate, segmentation_round)
+    well_names = seg_plate.get_names()
     if well not in well_names:
         raise KeyError(f"Well {well} not found in barcode {bc}.")
     well_idx = well_names.index(well)
-    well_ov = plate.images[well_idx]
+    well_ov = seg_plate.images[well_idx]
 
     table = well_ov.get_table(table_name, as_AnnData = True)
 
@@ -132,24 +136,16 @@ def segmentation_fidelity_check(ome_zarrs_dict, channel, channel_color, channel_
     """
     Plot randomly selected images and their corresponding segmentation masks from OME-Zarr plates.
 
-    Parameters
-    ----------
-    ome_zarrs_dict : dict
-    channel : int
-        Index of the image channel to display from the returned `img` array.
-    channel_color : str or matplotlib colormap
-        Colormap used to render the intensity image channel.
-    channel_range : list[int, int]
-    n : int
-        Number of wells to randomly sample and plot per barcode.
-    label_name : str
-        Name/key of the label to retrieve and overlay.
-    alpha : float
-        Opacity (0-1) used for non-zero label regions in the overlay.
-    pyramid_lvl_plot : int, default=4
-        Pyramid level to load for both image and label.
-    seed : int, default=0
-        Random seed, so the same wells are shown on re-runs.
+    Parameters:
+    - ome_zarrs_dict (dict): {barcode: plate} handles to draw from.
+    - channel (int): Index of the image channel to display, 0-based.
+    - channel_color (str or matplotlib colormap): Colour map for the intensity image.
+    - channel_range (list of int): [vmin, vmax] display range for the intensity image.
+    - n (int): Number of wells randomly sampled per barcode; capped at the wells available.
+    - label_name (str): Name of the label image to overlay.
+    - alpha (float): Opacity (0-1) of the label overlay.
+    - pyramid_lvl_plot (int): Pyramid level loaded for both image and label.
+    - seed (int): Random seed, so the same wells are shown on re-runs.
     """
 
     rng = random.Random(seed)
@@ -335,6 +331,7 @@ def plot_random_organoids_per_cluster(
                     ad.uns["label_name"],
                     pyramid_level,
                     st0,
+                    segmentation_round=ad.uns.get("segmentation_round", 0),
                 )
                 example_width = img0.shape[1]
                 break
@@ -381,6 +378,7 @@ def plot_random_organoids_per_cluster(
                             pyramid_level,
                             st,
                             add_boundary=add_boundary,
+                            segmentation_round=ad.uns.get("segmentation_round", 0),
                         )
                         # Apply mask if compatible
                         if mask is not None and mask.shape == img.shape:
@@ -434,6 +432,7 @@ def plot_random_organoids_per_cluster(
                             pyramid_level,
                             st,
                             add_boundary=add_boundary,
+                            segmentation_round=ad.uns.get("segmentation_round", 0),
                         )
                         img = img.copy()
                         if mask is not None and mask.shape == img.shape:
@@ -488,6 +487,16 @@ def plot_random_organoids_per_cluster(
     return fig
 
 def choose_bar_um(img_width_pixels, px_um, requested_um):
+    """Pick a round scalebar length that spans roughly a fifth of the image width.
+
+    Parameters:
+    - img_width_pixels (int): Width of the image being drawn on.
+    - px_um (float): Pixel size in micrometers at the displayed pyramid level.
+    - requested_um (float or None): Explicit length; when given it is returned unchanged.
+
+    Returns:
+    - float: Scalebar length in micrometers.
+    """
     if requested_um is not None:
         return float(requested_um)
     target_um = (img_width_pixels * px_um) / 5.0
@@ -496,6 +505,19 @@ def choose_bar_um(img_width_pixels, px_um, requested_um):
 
 # Helper: draw scalebar rectangle
 def draw_scalebar(ax_, img_shape, px_um, bar_um, color, alpha, pad_frac, height_frac):
+    """Draw a filled scalebar rectangle in the lower-left corner of an image axis.
+
+    Nothing is drawn if the bar would be smaller than one pixel.
+
+    Parameters:
+    - ax_ (matplotlib.axes.Axes): Axis to draw on.
+    - img_shape (tuple): Shape of the displayed image, (height, width, ...).
+    - px_um (float): Pixel size in micrometers at the displayed pyramid level.
+    - bar_um (float): Scalebar length in micrometers.
+    - color, alpha: Bar colour and opacity.
+    - pad_frac (float): Padding from the edges, as a fraction of width/height.
+    - height_frac (float): Bar height, as a fraction of the image height.
+    """
     H, W = img_shape[0], img_shape[1]
     bar_px = bar_um / px_um
     if bar_px < 1:
@@ -509,6 +531,14 @@ def draw_scalebar(ax_, img_shape, px_um, bar_um, color, alpha, pad_frac, height_
     ax_.add_patch(rect)
 
 def pad_to_square(img):
+    """Pad a 2D or 3D image with zeros until it is square, keeping it centred.
+
+    Parameters:
+    - img (numpy.ndarray): Image to pad.
+
+    Returns:
+    - numpy.ndarray: Square image, or the input unchanged if already square.
+    """
     h, w = img.shape[:2]
     if h == w:
         return img
@@ -588,6 +618,7 @@ def plot_all_stainings_per_UID(
                 pyramid_level = pyramid_level,
                 channel_str = staining,
                 add_boundary = add_boundary,
+                segmentation_round = ad.uns.get("segmentation_round", 0),
             )
 
             img = pad_to_square(img)

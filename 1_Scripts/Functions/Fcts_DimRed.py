@@ -166,6 +166,19 @@ def _get_2d_coords_for_plotting(ad, visualize_on=None, fallback_matrix=None, fal
 
 
 def select_dimred_features(ad, remove_features):
+    """Select the features usable for dimensionality reduction.
+
+    Keeps only features present for *every* object, because PCA/UMAP/clustering cannot handle
+    NaN. A feature is NaN for an object whenever its antibody mix does not include that stain,
+    so this drops the panel-specific columns and keeps the common core.
+
+    Parameters:
+    - ad (anndata.AnnData): Input object; ad.X is inspected.
+    - remove_features (list of str): Substrings; any feature whose name contains one is dropped.
+
+    Returns:
+    - used_features (list of str): Feature names safe to pass as `dimred_feats`.
+    """
     df = ad.to_df()
     common_feats = df.columns[~df.isna().any()]
     used_features = [x for x in common_feats if not any(rf in x for rf in remove_features)]
@@ -187,6 +200,23 @@ def compute_PCA(
     alpha=0.7,
     color_percentiles=(1, 99),
 ):
+    """Run PCA and plot consecutive principal-component pairs coloured by chosen features.
+
+    Parameters:
+    - ad (anndata.AnnData): Input object. Not modified; a copy is returned.
+    - plot_feat (str or list of str): Features to colour by. Each may be an obs column
+      (categorical hue) or a var name (continuous colour map).
+    - number_components (int): Number of principal components to compute.
+    - dimred_feats (list of str or None): Features to run PCA on; None uses all of them.
+    - representation (str or None): Key in ad.layers to use instead of ad.X (e.g. "z_scaled").
+    - palette (str): Colour map for continuous features.
+    - save_plot (bool): Save the figures to ad.uns["plot_dir"].
+    - dot_size (float), alpha (float): Scatter point size and opacity.
+    - color_percentiles (tuple or None): Percentile range for continuous colour limits.
+
+    Returns:
+    - ad (anndata.AnnData): Copy with X_pca in .obsm, PCs in .varm and pca info in .uns.
+    """
     if isinstance(plot_feat, str):
         plot_feat = [plot_feat]
 
@@ -358,6 +388,22 @@ def compute_DC(
     alpha=0.7,
     color_percentiles=(1, 99),
 ):
+    """Run a diffusion map and plot consecutive diffusion-component pairs.
+
+    The first diffusion component is constant and is skipped, so plotting starts at DC2.
+
+    Parameters:
+    - ad (anndata.AnnData): Input object. Not modified; a copy is returned.
+    - plot_feat (str or list of str): Features to colour by (obs column or var name).
+    - number_components (int): Number of diffusion components to compute.
+    - n_neighbors (int): Neighbourhood size for the underlying kNN graph.
+    - dimred_feats (list of str or None): Features to use; None uses all of them.
+    - representation (str or None): Key in ad.layers, or in ad.obsm (e.g. "X_pca").
+    - palette, save_plot, dot_size, alpha, color_percentiles: As in compute_PCA.
+
+    Returns:
+    - ad (anndata.AnnData): Copy with X_diffmap in .obsm and diffmap_evals in .uns.
+    """
     if isinstance(plot_feat, str):
         plot_feat = [plot_feat]
 
@@ -476,6 +522,25 @@ def compute_UMAP(
     alpha=0.7,
     color_percentiles=(1, 99),
 ):
+    """Run UMAP, optionally sweeping several parameter combinations.
+
+    Passing lists for n_neighbors and/or min_dist plots every combination as a grid. Only one
+    embedding can be stored, so .obsm["X_umap"] holds the last combination computed; the
+    function prints which one that was.
+
+    Parameters:
+    - ad (anndata.AnnData): Input object. Not modified; a copy is returned.
+    - plot_feat (str or list of str): Features to colour by. In a sweep only the first is used.
+    - n_neighbors (int or list of int): UMAP neighbourhood size(s).
+    - min_dist (float or list of float): UMAP minimum distance(s).
+    - dimred_feats (list of str): Features to use. Ignored when `representation` is an obsm key.
+    - save_plot (bool): Save the figure to ad.uns["plot_dir"].
+    - representation (str or None): Key in ad.layers, or in ad.obsm (e.g. "X_pca").
+    - palette, dot_size, alpha, color_percentiles: As in compute_PCA.
+
+    Returns:
+    - ad (anndata.AnnData): Copy with X_umap in .obsm.
+    """
     ad = remove_uns(ad, keys_to_remove=["ome_zarr_dict", "ome_zarr_df"])
     _validate_dimred_feats(ad, dimred_feats, allow_none=False)
     color_percentiles = _validate_color_percentiles(color_percentiles)
@@ -640,6 +705,26 @@ def compute_tSNE(
     alpha=0.7,
     color_percentiles=(1, 99),
 ):
+    """Run t-SNE, optionally sweeping perplexity and learning rate.
+
+    Passing lists for perplexity and/or learning_rate plots every combination as a grid. Only
+    one embedding can be stored, so .obsm["X_tsne"] holds the last combination computed; the
+    function prints which one that was.
+
+    Parameters:
+    - ad (anndata.AnnData): Input object. Not modified; a copy is returned.
+    - plot_feat (str or list of str): Features to colour by. In a sweep only the first is used.
+    - dimred_feats (list of str): Features to use. Ignored when `representation` is an obsm key.
+    - perplexity (float or list of float): t-SNE perplexity; must be < number of objects.
+    - learning_rate (float or list of float): t-SNE learning rate.
+    - save_plot (bool): Save the figure to ad.uns["plot_dir"].
+    - representation (str or None): Key in ad.layers, or in ad.obsm (e.g. "X_pca").
+    - early_exaggeration (float), random_state (int), metric (str): Passed to scanpy's t-SNE.
+    - palette, dot_size, alpha, color_percentiles: As in compute_PCA.
+
+    Returns:
+    - ad (anndata.AnnData): Copy with X_tsne in .obsm.
+    """
     ad = remove_uns(ad, keys_to_remove=["ome_zarr_dict", "ome_zarr_df"])
     _validate_dimred_feats(ad, dimred_feats, allow_none=False)
     color_percentiles = _validate_color_percentiles(color_percentiles)
@@ -801,6 +886,24 @@ def compute_kmeans(
     fallback_to_pca=True,
     point_size=6,
 ):
+    """Cluster objects with k-means, optionally for several values of k.
+
+    Parameters:
+    - ad (anndata.AnnData): Input object. Not modified; a copy is returned.
+    - n_clusters (int or list of int): Number of clusters; a list computes each in turn.
+    - dimred_feats (list of str): Features to cluster on. Ignored when `representation` is obsm.
+    - save_plot (bool): Save the figure to ad.uns["plot_dir"].
+    - representation (str or None): Key in ad.layers, or in ad.obsm (e.g. "X_pca").
+    - init, n_init, max_iter, random_state: Passed through to sklearn's KMeans.
+    - visualize_on (str or None): obsm key used for the scatter plot; None auto-picks X_umap,
+      X_tsne, X_pca or X_diffmap, in that order.
+    - fallback_to_pca (bool): If no embedding exists, compute a 2-component PCA for plotting.
+    - point_size (float): Scatter point size.
+
+    Returns:
+    - ad (anndata.AnnData): Copy with "kmeans_labels_{k}" per k in .obs, plus "kmeans_labels"
+      holding the last k computed.
+    """
     ad = remove_uns(ad, keys_to_remove=["ome_zarr_dict", "ome_zarr_df"])
     _validate_dimred_feats(ad, dimred_feats, allow_none=False)
 
@@ -888,6 +991,22 @@ def compute_phenograph(
     random_state=0,
     point_size=6,
 ):
+    """Cluster objects with PhenoGraph (Louvain on a kNN graph), optionally for several k.
+
+    Parameters:
+    - ad (anndata.AnnData): Input object. Not modified; a copy is returned.
+    - k (int or list of int): Neighbourhood size(s); must be smaller than the object count.
+    - dimred_feats (list of str): Features to cluster on. Ignored when `representation` is obsm.
+    - save_plot (bool): Save the figure to ad.uns["plot_dir"].
+    - representation (str or None): Key in ad.layers, or in ad.obsm (e.g. "X_pca").
+    - clustering_metric (str): Distance metric for the kNN graph.
+    - prune, jaccard, min_cluster_size, random_state: Passed through to phenograph.cluster.
+    - visualize_on, fallback_to_pca, point_size: As in compute_kmeans.
+
+    Returns:
+    - ad (anndata.AnnData): Copy with "phenograph_labels_{k}" per k in .obs, plus
+      "phenograph_labels" holding the last k computed.
+    """
     ad = remove_uns(ad, keys_to_remove=["ome_zarr_dict", "ome_zarr_df"])
     _validate_dimred_feats(ad, dimred_feats, allow_none=False)
 
@@ -983,6 +1102,26 @@ def run_phenograph(
     point_size=20,
     alpha=0.5,
 ):
+    """Cluster with PhenoGraph using one AnnData for the features and another for the embedding.
+
+    `ad` supplies the embedding and receives the labels; `ad_dimred` supplies the feature matrix.
+    Labels are assigned by position, so both must describe the same objects in the same order -
+    this is checked and raises if not.
+
+    Parameters:
+    - ad (anndata.AnnData): Object holding the embedding; a labelled copy is returned.
+    - ad_dimred (anndata.AnnData): Object holding the clustering features.
+    - k (int): PhenoGraph neighbourhood size.
+    - plot_save_dir (str or None): Output directory; None uses ad.uns["plot_dir"].
+    - save_plot (bool): Save the overview and per-cluster figures.
+    - layer (str): Layer of `ad_dimred` to cluster on.
+    - cluster_key (str): obs column the labels are written to.
+    - embedding_key (str): obsm key used for plotting.
+    - point_size (float), alpha (float): Scatter point size and opacity.
+
+    Returns:
+    - ad (anndata.AnnData): Copy with the cluster labels in .obs[cluster_key].
+    """
     if layer not in ad_dimred.layers:
         raise ValueError(f"Layer '{layer}' not found in ad_dimred.layers.")
 
@@ -1084,6 +1223,23 @@ def run_slingshot(
     point_size=15,
     cmap_pseudotime="magma",
 ):
+    """Infer lineages and pseudotime over an existing embedding and clustering with Slingshot.
+
+    Parameters:
+    - ad (anndata.AnnData): Input object. Not modified; a copy is returned.
+    - start_cluster (str or int): Cluster the trajectory starts from - either a label from
+      `cluster_key` or its integer index among the categories.
+    - num_epochs (int): Slingshot fitting iterations.
+    - save_plot (bool): Save the fitting and pseudotime figures to ad.uns["plot_dir"].
+    - cluster_key (str): obs column holding the cluster labels. Every object must be assigned.
+    - visualize_on (str): obsm key of the 2D embedding to fit on.
+    - point_size (float): Scatter point size.
+    - cmap_pseudotime (str): Colour map for the pseudotime plot.
+
+    Returns:
+    - ad (anndata.AnnData): Copy with "slingshot_pseudotime" (min-max scaled) and one
+      "slingshot_weight_lineage_{i}" column per lineage in .obs, and settings in .uns.
+    """
     if visualize_on not in ad.obsm:
         raise ValueError(f"Embedding '{visualize_on}' not found in ad.obsm.")
     coords = ad.obsm[visualize_on]
@@ -1216,6 +1372,16 @@ def subsample_anndata_geosketch(ad, fraction=0.1, use_rep="X_pca", random_state=
 
 
 def random_subset_anndata(adata, n, random_state):
+    """Take a random subset of a fixed number of objects, keeping their original order.
+
+    Parameters:
+    - adata (anndata.AnnData): Input object.
+    - n (int): Number of objects to keep; must be between 0 and adata.n_obs.
+    - random_state (int): Random seed.
+
+    Returns:
+    - adata_sub (anndata.AnnData): Copy containing the sampled objects.
+    """
     if n < 0 or n > adata.n_obs:
         raise ValueError(f"n must be between 0 and {adata.n_obs}, got {n}")
 
@@ -1228,6 +1394,16 @@ def random_subset_anndata(adata, n, random_state):
 
 
 def random_subset_anndata_frac(adata, fraction, random_state):
+    """Take a random subset of a fraction of objects, keeping their original order.
+
+    Parameters:
+    - adata (anndata.AnnData): Input object.
+    - fraction (float): Fraction to keep, in (0, 1]. At least one object is always kept.
+    - random_state (int): Random seed.
+
+    Returns:
+    - adata_sub (anndata.AnnData): Copy containing the sampled objects.
+    """
     if fraction <= 0 or fraction > 1:
         raise ValueError(f"fraction must be in (0, 1], got {fraction}")
 
@@ -1254,6 +1430,23 @@ def knn_label_transfer(
     target_obs_key: Optional[str] = None,
     copy: bool = False,
 ) -> Optional[anndata.AnnData]:
+    """Transfer a label from a reference AnnData onto a target AnnData with a kNN classifier.
+
+    Parameters:
+    - adata_ref (anndata.AnnData): Labelled reference objects.
+    - adata_target (anndata.AnnData): Objects to predict labels for.
+    - label_key (str): obs column in the reference holding the labels.
+    - n_neighbors (int): Number of neighbours used for the vote.
+    - layer (str or None): Layer to use as the feature matrix; mutually exclusive with obsm_key.
+    - obsm_key (str or None): obsm key to use instead (e.g. "X_pca").
+    - features (list of str or None): Restrict to these var names. Use it whenever the two objects
+      may not share the same variable order, since otherwise columns are matched by position.
+    - target_obs_key (str or None): obs column to write into; defaults to `label_key`.
+    - copy (bool): Return a labelled copy instead of writing into adata_target in place.
+
+    Returns:
+    - anndata.AnnData if copy=True, otherwise None (adata_target is modified in place).
+    """
     if (layer is not None) and (obsm_key is not None):
         raise ValueError("Provide at most one of 'layer' or 'obsm_key', not both.")
 

@@ -37,12 +37,26 @@ def _hstack_X(X1, X2):
 
 
 def validate_required_obs(adata: ad.AnnData, required_cols: list[str], name: str = "AnnData") -> None:
+    """Raise if an AnnData is missing any of the required obs columns.
+
+    Parameters:
+    - adata (anndata.AnnData): Object to check.
+    - required_cols (list of str): Column names that must exist in .obs.
+    - name (str): Label used in the error message to identify the object.
+    """
     missing = [c for c in required_cols if c not in adata.obs.columns]
     if missing:
         raise ValueError(f"{name} is missing required obs columns: {missing}")
 
 
 def coerce_numeric_coords(adata: ad.AnnData, x_col: str, y_col: str, name: str = "AnnData") -> None:
+    """Convert centroid coordinate columns to numeric in place, raising if any value is missing.
+
+    Parameters:
+    - adata (anndata.AnnData): Object to modify in place.
+    - x_col (str), y_col (str): obs columns holding the centroid coordinates in micrometers.
+    - name (str): Label used in the error message to identify the object.
+    """
     adata.obs[x_col] = pd.to_numeric(adata.obs[x_col], errors="coerce")
     adata.obs[y_col] = pd.to_numeric(adata.obs[y_col], errors="coerce")
     if adata.obs[[x_col, y_col]].isna().any().any():
@@ -158,10 +172,16 @@ def merge_anndata_by_matches(
     - Adds columns: AD1 features + AD2 features (after prefixing var_names).
     - Merges obs: AD1 obs + prefixed AD2 obs + matched_ad2_id + match_distance_um.
 
-    Parameters
-    ----------
-    match_df : DataFrame
-        index = AD1 obs_names, column 'ad2_id' contains AD2 obs_names.
+    Parameters:
+    - ad1 (anndata.AnnData), ad2 (anndata.AnnData): The two objects to merge.
+    - match_df (pd.DataFrame): Index is AD1 obs_names; column 'ad2_id' holds AD2 obs_names.
+    - prefix_ad1 (str), prefix_ad2 (str): Prefixes applied to each object's var_names.
+    - prefix_ad2_obs (str or None): Prefix for AD2's obs columns; defaults to prefix_ad2.
+    - keep_uns_from (str): "ad1", "ad2", or anything else for an empty .uns.
+    - matching_uns (dict or None): Stored under .uns["matching"] as a record of the run.
+
+    Returns:
+    - ad_merged (anndata.AnnData): Matched AD1 rows with both feature sets side by side.
     """
 
     if prefix_ad2_obs is None:
