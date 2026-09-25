@@ -3,6 +3,7 @@ import seaborn as sns
 import scipy.sparse
 import pandas as pd
 import numpy as np
+import warnings
 
 """
 ***
@@ -77,8 +78,10 @@ def normalize_groups(adata, group_by, control=None):
       but are NOT dropped. Each feature is scaled independently using its own
       non-NaN control (or group) cells.
     - NaN values in the output layers remain NaN.
-    - A ValueError is raised if no control cells are found in a group, or if any
-      feature has zero non-NaN control cells.
+    - Features that are NaN for every cell in a group (e.g. a staining not used on
+      that plate) are skipped for that group and stay NaN.
+    - A ValueError is raised if no control cells are found in a group, or if a
+      feature has values in a group but zero non-NaN control cells.
     """
 
     if isinstance(group_by, str):
@@ -136,15 +139,25 @@ def normalize_groups(adata, group_by, control=None):
                     f"Cannot fit scalers."
                 )
 
-            # Raise if any feature has zero non-NaN control cells
-            n_valid_per_feature = (~np.isnan(fit_data)).sum(axis=0)
-            missing_features = [
-                adata.var_names[i] for i, n in enumerate(n_valid_per_feature) if n == 0
+            # Features that are NaN in the whole group (e.g. staining not used on this plate)
+            # are skipped and stay NaN. Raise only if the group has values for a feature but
+            # its controls don't, since those values could not be normalized.
+            n_valid_ctrl  = (~np.isnan(fit_data)).sum(axis=0)
+            n_valid_group = (~np.isnan(group_data)).sum(axis=0)
+            absent_features = [
+                adata.var_names[i] for i in range(n_features) if n_valid_group[i] == 0
             ]
+            missing_features = [
+                adata.var_names[i] for i in range(n_features)
+                if n_valid_ctrl[i] == 0 and n_valid_group[i] > 0
+            ]
+            if absent_features:
+                print(f"Group '{group}': {len(absent_features)} features have no values "
+                      f"in this group and are left as NaN.")
             if missing_features:
                 raise ValueError(
-                    f"Group '{group}': the following features have NO non-NaN control "
-                    f"cells and cannot be normalized:\n{missing_features}"
+                    f"Group '{group}': the following features have values in the group but "
+                    f"NO non-NaN control cells and cannot be normalized:\n{missing_features}"
                 )
 
         # --- Per-feature scaler fitting (NaN-aware, no row dropping) ---
@@ -246,7 +259,10 @@ def check_control_normalization(adata, control, group_by, tol=0.5):
                 continue
 
             data = adata.layers[layer][ctrl_int_idx]
-            stat = metric_fn(data)
+            # Features absent from this group are all-NaN; silence the empty-slice warnings
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", category=RuntimeWarning)
+                stat = metric_fn(data)
             max_dev = np.nanmax(np.abs(stat))
             status = "✅ OK" if max_dev < tol else "⚠️  WARNING"
 

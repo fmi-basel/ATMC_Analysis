@@ -207,10 +207,19 @@ def save_after_filtering(df, df_raw, ad_raw):
     # Save DF
     save_df(save_dir, "2_FeaturesFiltered"+"_{date:%Y-%m-%d_%Hh%Mmin%Ss}".format(date=datetime.datetime.now()), df)
 
-    # Filter anndata, then strip runtime-only keys from the copy (not from ad_raw)
-    ad = ad_raw[df.index,:].copy()
+    # Temporarily remove runtime-only keys before copying: .copy() deep-copies .uns, and the
+    # ez_zarr ImageList objects in ome_zarr_dict recurse infinitely when deep-copied
+    backup = {}
     for key in ["ome_zarr_dict", "ome_zarr_df"]:
-        ad.uns.pop(key, None)
+        if key in ad_raw.uns:
+            backup[key] = ad_raw.uns.pop(key)
+
+    try:
+        ad = ad_raw[df.index,:].copy()
+    finally:
+        # Restore removed keys so ad_raw stays unmodified and the filtering cells stay re-runnable
+        for key, val in backup.items():
+            ad_raw.uns[key] = val
 
     # Save list of deleted organoid IDs
     ad.uns["deleted_IDs"] = list(set(df_raw.index.to_list()) - set(df.index.to_list()))
