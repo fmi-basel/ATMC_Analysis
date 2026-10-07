@@ -2153,6 +2153,77 @@ def _prefix_vars_with_round(ad_t, round_id: int):
     return ad_cp
 
 
+# Older ngio names for the table backends.
+_TABLE_BACKEND_ALIASES = {
+    "anndata_v1": "anndata",
+    "experimental_parquet_v1": "parquet",
+    "experimental_csv_v1": "csv",
+    "experimental_json_v1": "json",
+}
+
+
+def _read_feature_table(table_zarr_path: str):
+    """Read one well's feature table as AnnData, whichever backend wrote it.
+
+    Fractal tasks built on ngio store a table as AnnData (obs/var/X groups), as a
+    table.parquet or table.csv file inside the table group, or as JSON in the attributes of
+    a "table" subgroup; the group's "backend" attribute says which. Non-AnnData tables are
+    converted the way ngio converts them: the index column (usually "label") becomes
+    obs_names, numeric columns become X and string columns go to obs.
+
+    Returns None when the table holds no objects: no table folder, a folder with metadata
+    but no data, or zero rows. Wells without segmented objects end up in one of these states.
+    """
+    import zarr
+    from anndata.io import read_zarr
+
+    try:
+        attrs = zarr.open_group(table_zarr_path, mode="r").attrs.asdict()
+    except FileNotFoundError:
+        return None
+
+    backend = str(attrs.get("backend", "anndata"))
+    backend = _TABLE_BACKEND_ALIASES.get(backend, backend)
+
+    if backend == "anndata":
+        if not os.path.isdir(os.path.join(table_zarr_path, "obs")):
+            return None
+        table = read_zarr(table_zarr_path)
+        # fractal-tasks-core tables keep the label in obs["label"] and number obs_names 0..n-1;
+        # Organoid_ID has to carry the label so load_img_mask_by_UID finds the object.
+        if "label" in table.obs.columns:
+            table.obs_names = table.obs["label"].astype(str)
+        return table if table.n_obs > 0 else None
+
+    if backend in ("parquet", "csv"):
+        data_path = os.path.join(table_zarr_path, f"table.{backend}")
+        if not os.path.exists(data_path):
+            return None
+        df = pd.read_parquet(data_path) if backend == "parquet" else pd.read_csv(data_path)
+    elif backend == "json":
+        try:
+            columns = zarr.open_group(os.path.join(table_zarr_path, "table"), mode="r").attrs.asdict()
+        except FileNotFoundError:
+            return None
+        df = pd.DataFrame.from_dict(columns)
+    else:
+        raise ValueError(f"Unsupported table backend '{backend}' in {table_zarr_path}")
+
+    if len(df) == 0:
+        return None
+    index_key = attrs.get("index_key", "label")
+    if index_key in df.columns:
+        df = df.set_index(index_key)
+    df.index = df.index.astype(str)
+
+    num_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
+    return anndata.AnnData(
+        X=df[num_cols].to_numpy(dtype="float64"),
+        obs=df.drop(columns=num_cols),
+        var=pd.DataFrame(index=num_cols),
+    )
+
+
 
 def merge_feature_tables_from_zarr(
     source: str,
@@ -2168,11 +2239,14 @@ def merge_feature_tables_from_zarr(
     multiplexing_round: int = 0,
     file_ending: str = ".zarr",
 ):
-    """Load and merge precomputed AnnData feature tables stored in OME-Zarr under <round>/tables/<name>."""
+    """Load and merge precomputed feature tables stored in OME-Zarr under <round>/tables/<name>.
+
+    Tables can be stored with any ngio backend (AnnData, Parquet, CSV, JSON). Wells whose
+    tables hold no objects (typically nothing was segmented there) are skipped and listed.
+    """
 
     import os
     import anndata as ad
-    from anndata.io import read_zarr
     from ez_zarr import ome_zarr
 
     if analysis_dir is None:
@@ -2188,10 +2262,8 @@ def merge_feature_tables_from_zarr(
     def _load_plate_for_round(plate_path: str, round_id: int):
         return ome_zarr.import_plate(plate_path, image_name=str(int(round_id)))
 
-    def _read_table_anndata(table_zarr_path: str):
-        return read_zarr(table_zarr_path)
-
     tables_all = []
+    skipped_wells = []
 
     # `folder` is the {barcode: folder} mapping from make_experiment. A plain list is
     # resolved here the same way, so that a barcode is never paired with a plate by
@@ -2215,12 +2287,21 @@ def merge_feature_tables_from_zarr(
         for well, path_in_plate in zip(wells, well_paths):
 
             if well in meta.keys():
-                ad_list = []
-                for tname in feature_table_names:
-                    table_path = os.path.join(plate_path, path_in_plate, "tables", tname)
-                    if not os.path.exists(table_path):
-                        raise FileNotFoundError(f"Cannot find table: {table_path}")
-                    ad_list.append(_read_table_anndata(table_path))
+                ad_list = [
+                    _read_feature_table(os.path.join(plate_path, path_in_plate, "tables", tname))
+                    for tname in feature_table_names
+                ]
+
+                # Wells without segmented objects get no table, or a table without data.
+                empty = [t for t, ad_t in zip(feature_table_names, ad_list) if ad_t is None]
+                if len(empty) == len(ad_list):
+                    skipped_wells.append(f"{barcode_guess} {well}")
+                    continue
+                if empty:
+                    raise ValueError(
+                        f"Well {well} ({barcode_guess}) has objects in some feature tables but none in {empty}. "
+                        "Check that every feature extraction task ran on this well."
+                    )
 
                 obs0 = ad_list[0].obs_names
                 for j, ad_t in enumerate(ad_list[1:], start=1):
@@ -2258,6 +2339,12 @@ def merge_feature_tables_from_zarr(
                 ad_well.obs["Experiment_ID"] = experiment_ID
 
                 tables_all.append(ad_well)
+
+    if skipped_wells:
+        print(
+            f"Round {multiplexing_round}: skipped {len(skipped_wells)} well(s) without objects "
+            f"(no {feature_table_names} table, or an empty one): {', '.join(skipped_wells)}"
+        )
 
     if len(tables_all) == 0:
         raise RuntimeError("No feature tables loaded. Check table names and OME-Zarr structure.")

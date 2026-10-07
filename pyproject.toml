@@ -15,6 +15,7 @@ dependencies = [
     "opencv-python-headless>=4.11.0.86",
     "pandas>=2.3.3",
     "phenograph>=1.5.7",
+    "pyarrow>=25.0.1",
     "pyslingshot>=0.2.0",
     "scanpy>=1.11.5",
     "scikit-learn>=1.9.0",
