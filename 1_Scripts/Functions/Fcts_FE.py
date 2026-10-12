@@ -2105,9 +2105,15 @@ def extract_features_multicycle(
     feats_categorical = [col for col in feats_categorical if col in df_total.columns]
     feats_numerical = [col for col in df_total.columns if col not in feats_categorical]
 
+    # Layout cells can mix text and numbers (e.g. Medium "Ctrl" and 74), and h5ad can only
+    # write object columns that hold strings only.
+    obs = df_total.loc[:, feats_categorical].copy()
+    obj_cols = obs.select_dtypes(include="object").columns
+    obs[obj_cols] = obs[obj_cols].astype(str)
+
     ad = anndata.AnnData(
         X=df_total[feats_numerical].values,
-        obs=df_total.loc[:, feats_categorical],
+        obs=obs,
         var=pd.DataFrame(index=feats_numerical),
     )
 
@@ -2351,6 +2357,10 @@ def merge_feature_tables_from_zarr(
 
     ad_all = ad.concat(tables_all, axis=0, merge="same", join="outer", index_unique=None)
     ad_all.obs = ad_all.obs.copy()
+    # Layout cells can mix text and numbers (e.g. Medium "Ctrl" and 74), and h5ad can only
+    # write object columns that hold strings only.
+    obj_cols = ad_all.obs.select_dtypes(include="object").columns
+    ad_all.obs[obj_cols] = ad_all.obs[obj_cols].astype(str)
     ad_all.obs_names = ad_all.obs["Organoid_ID"].astype(str)
 
     ad_all.uns["stainings"] = _stringify_dict_keys(stainings) if stainings is not None else {}
