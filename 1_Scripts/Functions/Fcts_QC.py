@@ -70,8 +70,10 @@ def normalize_groups(adata, group_by, control=None):
     adata (anndata.AnnData): The AnnData object containing the data to be normalized.
     group_by (str or list of str): The column name(s) in adata.obs to group the data by.
     control (dict, optional): A dictionary specifying the control group for normalization.
-        The key is the column name, and the value is the control group value.
-        If None, each group is normalized independently.
+        Each key is a column name in adata.obs, and each value is the control value for
+        that column. Multiple key-value pairs are combined with AND, e.g.
+        {"Medium": "Control", "Cell_line": "WT"} selects cells that are both Medium ==
+        "Control" and Cell_line == "WT". If None, each group is normalized independently.
 
     Notes:
     - Cells with NaN in a feature are ignored when fitting scalers for that feature,
@@ -116,9 +118,10 @@ def normalize_groups(adata, group_by, control=None):
     minmax_normalized_data = np.full_like(df_log.values, np.nan, dtype=np.float64)
 
     if control is not None:
-        if len(control) != 1:
-            raise ValueError("Control dictionary must have exactly one key-value pair")
-        control_key, control_value = list(control.items())[0]
+        if len(control) == 0:
+            raise ValueError("Control dictionary must have at least one key-value pair")
+        control_mask_all = _control_mask(adata.obs, control)
+        control_label = _control_label(control)
 
     for group, indices in groups.items():
         int_indices = adata.obs_names.get_indexer(indices)
@@ -129,13 +132,12 @@ def normalize_groups(adata, group_by, control=None):
         if control is None:
             fit_data = group_data
         else:
-            subset_obs = adata.obs.loc[indices]
-            control_mask = (subset_obs[control_key] == control_value).values
+            control_mask = control_mask_all[int_indices]
             fit_data = group_data[control_mask]
 
             if fit_data.shape[0] == 0:
                 raise ValueError(
-                    f"No control cells ('{control_value}') found in group '{group}'. "
+                    f"No control cells ({control_label}) found in group '{group}'. "
                     f"Cannot fit scalers."
                 )
 
@@ -224,6 +226,25 @@ def normalize_groups(adata, group_by, control=None):
         check_control_normalization(adata, control=control, group_by=group_by)
     return adata
 
+def _control_mask(obs, control):
+    """
+    Boolean mask over the rows of obs that match ALL key-value pairs in control.
+    """
+    missing_keys = [k for k in control if k not in obs.columns]
+    if missing_keys:
+        raise KeyError(f"Control key(s) not found in adata.obs: {missing_keys}")
+
+    mask = np.ones(len(obs), dtype=bool)
+    for key, value in control.items():
+        mask &= (obs[key] == value).values
+    return mask
+
+
+def _control_label(control):
+    """
+    Readable description of a control dict for log/error messages, e.g. "Medium=Control, Cell_line=WT".
+    """
+    return ", ".join(f"{k}={v}" for k, v in control.items())
 
 def check_control_normalization(adata, control, group_by, tol=0.5):
     """
