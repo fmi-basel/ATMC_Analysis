@@ -1,5 +1,6 @@
 from natsort import natsorted
 from ez_zarr import ome_zarr
+import numpy as np
 import pandas as pd
 import datetime
 import anndata
@@ -191,38 +192,69 @@ def save_fig(fig, path, filename, dpi=300):
     fig.savefig(savepath_png, transparent=True, dpi=dpi, bbox_inches="tight")
     print(f"Saved as:\n{savepath_pdf}\nand\n{savepath_png}")
 
-def save_after_filtering(df, df_raw, ad_raw):
+# obs columns kept for each removed organoid in adata.uns["removed_organoids"]
+_REMOVED_COLUMNS = ["Barcode", "Well", "Medium", "Cell_line", "ABs", "Other", "centroid_x_micrometer",
+                    "centroid_y_micrometer"]
+
+
+def remove_organoids(ad, remove, step, reason):
     """
-    Save the filtered DataFrame, updated AnnData object, and a list of deleted organoid IDs.
+    Remove organoids and record why in ad.uns["removed_organoids"].
+
+    The record has one row per removed organoid (index: organoid ID) with its plate, well,
+    condition and position (the columns of _REMOVED_COLUMNS in ad.obs), the step that removed it
+    and the reason. Earlier rows are kept, so the record lists every removal since the raw data.
 
     Parameters:
-    - df (pd.DataFrame): Filtered DataFrame containing organoid information.
-    - df_raw (pd.DataFrame): Unfiltered DataFrame, used to record which IDs were removed.
-    - ad_raw (anndata.AnnData): Original AnnData object. Left unmodified: the runtime-only
-      keys are stripped from the saved copy, so the filtering cells stay re-runnable.
-    """
+    - ad (anndata.AnnData): Input AnnData object; left unchanged.
+    - remove (array of bool): True for the organoids to remove.
+    - step (str): The removing step, e.g. "remove_cut_organoids".
+    - reason (str or array of str): The reason, for all organoids or one per organoid of ad.
 
-    save_dir = ad_raw.uns["table_dir"]
+    Returns:
+    - ad (anndata.AnnData): A copy without the removed organoids. The loaded OME-Zarr plates are
+      passed on without copying.
+    """
+    remove = np.asarray(remove, dtype=bool)
+    reason = np.broadcast_to(np.asarray(reason, dtype=object), remove.shape)
+    removed = ad.obs.loc[remove, [c for c in _REMOVED_COLUMNS if c in ad.obs.columns]]
+    removed = removed.astype({c: str for c in removed.columns if not pd.api.types.is_numeric_dtype(removed[c])})
+    removed["step"] = step
+    removed["reason"] = reason[remove].astype(str)
+    removed.index = removed.index.astype(str)
+    removed.index.name = None
+
+    # .copy() deep-copies .uns, and the ez_zarr ImageList objects in ome_zarr_dict recurse
+    # infinitely when deep-copied: move the runtime-only keys over instead
+    runtime = {key: ad.uns.pop(key) for key in ["ome_zarr_dict", "ome_zarr_df"] if key in ad.uns}
+    try:
+        kept = ad[~remove].copy()
+    finally:
+        ad.uns.update(runtime)
+    kept.uns.update(runtime)
+
+    previous = kept.uns.get("removed_organoids")
+    kept.uns["removed_organoids"] = removed if previous is None else pd.concat([previous, removed])
+    return kept
+
+
+def save_after_filtering(ad):
+    """
+    Save the filtered AnnData object, and its features and obs as a CSV table.
+
+    ad.uns["deleted_IDs"] lists the removed organoid IDs; ad.uns["removed_organoids"] (written by
+    the filter functions) also records why each was removed.
+
+    Parameters:
+    - ad (anndata.AnnData): Filtered AnnData object. The runtime-only keys are stripped from the
+      saved file only, so the filtering cells stay re-runnable.
+    """
+    removed = ad.uns.get("removed_organoids")
+    ad.uns["deleted_IDs"] = [] if removed is None else removed.index.tolist()
 
     # Save DF
-    save_df(save_dir, "2_FeaturesFiltered"+"_{date:%Y-%m-%d_%Hh%Mmin%Ss}".format(date=datetime.datetime.now()), df)
-
-    # Temporarily remove runtime-only keys before copying: .copy() deep-copies .uns, and the
-    # ez_zarr ImageList objects in ome_zarr_dict recurse infinitely when deep-copied
-    backup = {}
-    for key in ["ome_zarr_dict", "ome_zarr_df"]:
-        if key in ad_raw.uns:
-            backup[key] = ad_raw.uns.pop(key)
-
-    try:
-        ad = ad_raw[df.index,:].copy()
-    finally:
-        # Restore removed keys so ad_raw stays unmodified and the filtering cells stay re-runnable
-        for key, val in backup.items():
-            ad_raw.uns[key] = val
-
-    # Save list of deleted organoid IDs
-    ad.uns["deleted_IDs"] = list(set(df_raw.index.to_list()) - set(df.index.to_list()))
+    df = pd.concat([ad.to_df(), ad.obs.astype(str)], axis=1)
+    save_df(ad.uns["table_dir"], "2_FeaturesFiltered"+"_{date:%Y-%m-%d_%Hh%Mmin%Ss}".format(date=datetime.datetime.now()), df)
 
     # Save AnnData object
     save_adata(ad, "2_FeaturesFiltered")

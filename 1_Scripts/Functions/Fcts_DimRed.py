@@ -165,27 +165,164 @@ def _get_2d_coords_for_plotting(ad, visualize_on=None, fallback_matrix=None, fal
     return tmp.obsm["X_pca"][:, :2], "PCA(2) fallback"
 
 
-def select_dimred_features(ad, remove_features):
-    """Select the features usable for dimensionality reduction.
+def select_dimred_features(ad, remove_features, condition_cols=("Medium", "Cell_line", "ABs", "Other"),
+                           plate_col="Barcode", well_col="Well", exclude_saturated=True, max_mode_fraction=0.95,
+                           max_well_effect=0.3, min_reliability=0.2, max_correlation=0.9, n_splits=20, seed=0,
+                           plot=True):
+    """Select the features used for dimensionality reduction and clustering.
 
-    Keeps only features present for *every* object, because PCA/UMAP/clustering cannot handle
-    NaN. A feature is NaN for an object whenever its antibody mix does not include that stain,
-    so this drops the panel-specific columns and keeps the common core.
+    Each feature gets the first reason that applies (table in ad.uns["feature_selection"]):
+    1. "missing values": NaN for some objects, e.g. a staining missing from an antibody mix;
+       PCA/UMAP/clustering cannot handle NaN.
+    2. "removed by name": the name contains one of remove_features.
+    3. "saturated": listed in ad.uns["saturated_features"] by check_saturation (if exclude_saturated).
+    4. "near-constant": one value in more than max_mode_fraction of the objects (e.g. mostly 0).
+    5. "well effect": the share of the variance within a condition that comes from differences between
+       its replicate wells (intraclass correlation) is above max_well_effect. Organoids of one condition
+       should not depend on their well; a high share points to technical variation (e.g. uneven
+       staining) that would make wells instead of biology shape the embedding.
+    6. "not reproducible": the split-half reliability of the differences between conditions is below
+       min_reliability. On each plate, the wells of every condition are split randomly into two halves,
+       and the condition means of the two halves are correlated over conditions (Spearman-Brown
+       corrected, averaged over n_splits splits). Low = the condition differences are mostly noise.
+       Features without any condition effect also score low; min_reliability=None keeps them.
+    7. "redundant with <feature>": |Spearman correlation| > max_correlation with a kept, more reliable
+       feature. Redundant features would count the same property several times in a PCA.
+
+    All statistics use rank-based normal scores within plates (within plate x condition for the well
+    effect), so they do not depend on log1p/Yeo-Johnson, skew or plate shifts.
 
     Parameters:
     - ad (anndata.AnnData): Input object; ad.X is inspected.
     - remove_features (list of str): Substrings; any feature whose name contains one is dropped.
+    - condition_cols (list of str): Columns in ad.obs that together define a condition.
+    - plate_col, well_col (str): Columns in ad.obs with the plate ID and the well name.
+    - exclude_saturated (bool): Drop ad.uns["saturated_features"].
+    - max_mode_fraction (float): Largest allowed share of the most common value.
+    - max_well_effect (float or None): Largest allowed well effect (0-1); None skips this step.
+    - min_reliability (float or None): Smallest allowed split-half reliability; None skips this step.
+    - max_correlation (float or None): Largest allowed |correlation| with a kept feature; None skips it.
+    - n_splits (int), seed (int): Random splits for the reliability.
+    - plot (bool): Plot well effect vs. reliability of the features.
 
     Returns:
     - used_features (list of str): Feature names safe to pass as `dimred_feats`.
     """
-    df = ad.to_df()
-    common_feats = df.columns[~df.isna().any()]
-    used_features = [x for x in common_feats if not any(rf in x for rf in remove_features)]
+    from Functions.Fcts_QC import _BLUE, _GRAY, _GRAY_LIGHT, _INK_SECONDARY, _condition_labels, _normal_scores
+
+    df = ad.to_df().astype(np.float64)
+    reason = pd.Series("", index=df.columns, dtype=object)
+
+    def assign(mask, text):
+        reason[(reason == "").to_numpy() & np.asarray(mask, dtype=bool)] = text
+
+    assign(df.isna().any(), "missing values")
+    assign([any(rf in f for rf in remove_features) for f in df.columns], "removed by name")
+    if exclude_saturated:
+        assign(df.columns.isin(list(ad.uns.get("saturated_features", []))), "saturated")
+    mode_fraction = df.apply(lambda c: c.value_counts(normalize=True).iloc[0] if c.notna().any() else np.nan)
+    assign(mode_fraction > max_mode_fraction, "near-constant")
+
+    candidates = list(reason.index[reason == ""])
+    plate = ad.obs[plate_col].astype(str).to_numpy()
+    well = ad.obs[well_col].astype(str).to_numpy()
+    condition = _condition_labels(ad.obs, [c for c in condition_cols if c in ad.obs.columns])
+    well_effect = pd.Series(np.nan, index=df.columns)
+    reliability = pd.Series(np.nan, index=df.columns)
+    if candidates:
+        X = df[candidates]
+        scores = _normal_scores(X, plate)
+        well_effect[candidates] = _well_effect(_normal_scores(X, [plate, condition]), plate, condition, well)
+        reliability[candidates] = _split_half_reliability(scores, plate, condition, well, n_splits, seed)
+        if max_well_effect is not None:
+            assign(well_effect > max_well_effect, "well effect")
+        if min_reliability is not None:
+            assign(reliability < min_reliability, "not reproducible")
+
+        remaining = list(reliability[reason == ""].sort_values(ascending=False, na_position="last").index)
+        if max_correlation is not None and len(remaining) > 1:
+            rng = np.random.default_rng(seed)
+            rows = rng.choice(len(scores), size=min(len(scores), 5000), replace=False)
+            # Pearson correlation of normal scores ~ Spearman correlation
+            corr = np.abs(np.corrcoef(scores[remaining].to_numpy()[rows], rowvar=False))
+            kept = []
+            for j, feat in enumerate(remaining):
+                if kept and np.nanmax(corr[j, kept]) > max_correlation:
+                    reason[feat] = f"redundant with {remaining[kept[int(np.nanargmax(corr[j, kept]))]]}"
+                else:
+                    kept.append(j)
+
+    selection = pd.DataFrame({"reason": reason.replace("", "kept"), "mode_fraction": mode_fraction,
+                              "well_effect": well_effect, "reliability": reliability})
+    ad.uns["feature_selection"] = selection
+    used_features = list(reason.index[reason == ""])
+
+    summary = selection["reason"].str.replace(r"^redundant with .*", "redundant", regex=True).value_counts()
+    print(f"Selected {len(used_features)} of {len(df.columns)} features. Dropped: "
+          + ", ".join(f"{n} {r}" for r, n in summary.items() if r != "kept") + ". See ad.uns['feature_selection'].")
     if not used_features:
         import warnings
-        warnings.warn("select_dimred_features: no features remain after filtering. Check remove_features or NaN coverage.")
+        warnings.warn("select_dimred_features: no features remain after filtering. Check the thresholds.")
+
+    if plot and candidates:
+        tested = selection.loc[candidates]
+        groups = [("kept", tested["reason"] == "kept", _BLUE),
+                  ("well effect / not reproducible", tested["reason"].isin(["well effect", "not reproducible"]), _GRAY),
+                  ("redundant", tested["reason"].str.startswith("redundant"), _GRAY_LIGHT)]
+        fig, ax = plt.subplots(figsize=(5, 4), layout="constrained")
+        for label, mask, color in groups:
+            ax.scatter(tested.loc[mask, "well_effect"], tested.loc[mask, "reliability"], s=14, color=color,
+                       edgecolors="white", linewidths=0.4, label=f"{label} ({int(mask.sum())})")
+        if max_well_effect is not None:
+            ax.axvline(max_well_effect, color=_INK_SECONDARY, linewidth=0.8, linestyle=(0, (3, 2)))
+        if min_reliability is not None:
+            ax.axhline(min_reliability, color=_INK_SECONDARY, linewidth=0.8, linestyle=(0, (3, 2)))
+        ax.set_xlabel("Well effect (share of within-condition variance between replicate wells)")
+        ax.set_ylabel("Split-half reliability of condition differences")
+        ax.legend(frameon=False, loc="lower right")
+        fig.suptitle("Feature selection (dashed: thresholds)")
+        plt.show()
     return used_features
+
+
+def _well_effect(scores, plate, condition, well):
+    """Intraclass correlation of the replicate wells within plate x condition (pooled one-way ANOVA)."""
+    well_mean = scores.groupby([plate, well]).transform("mean")
+    group_mean = scores.groupby([plate, condition]).transform("mean")
+    n = len(scores)
+    n_wells = len(pd.MultiIndex.from_arrays([plate, well]).unique())
+    n_groups = len(pd.MultiIndex.from_arrays([plate, condition]).unique())
+    if n_wells <= n_groups or n <= n_wells:
+        return pd.Series(np.nan, index=scores.columns)
+    ms_between = ((well_mean - group_mean) ** 2).sum() / (n_wells - n_groups)
+    ms_within = ((scores - well_mean) ** 2).sum() / (n - n_wells)
+    n0 = n / n_wells
+    return ((ms_between - ms_within) / (ms_between + (n0 - 1) * ms_within)).clip(lower=0)
+
+
+def _split_half_reliability(scores, plate, condition, well, n_splits, seed):
+    """Spearman-Brown corrected correlation of condition means between random halves of their wells."""
+    profiles = scores.groupby([plate, well]).mean()
+    keys = pd.DataFrame({"condition": condition}).groupby([plate, well]).first().reset_index()
+    keys.columns = ["plate", "well", "condition"]
+    usable = (keys.groupby(["plate", "condition"])["well"].transform("size") >= 2).to_numpy()
+    if usable.sum() < 6:
+        return pd.Series(np.nan, index=scores.columns)
+    rng = np.random.default_rng(seed)
+    correlations = []
+    for _ in range(n_splits):
+        order = rng.permutation(len(keys))
+        half = np.empty(len(keys), dtype=int)
+        half[order] = keys.iloc[order].groupby(["plate", "condition"]).cumcount().to_numpy() % 2
+        groups = [keys["plate"].to_numpy()[usable], keys["condition"].to_numpy()[usable], half[usable]]
+        means = profiles[usable].groupby(groups).mean()
+        a, b = means.xs(0, level=2), means.xs(1, level=2)
+        # Only differences between conditions within a plate count
+        a = a - a.groupby(level=0).transform("mean")
+        b = b - b.groupby(level=0).transform("mean")
+        correlations.append(a.corrwith(b))
+    r = pd.concat(correlations, axis=1).mean(axis=1)
+    return 2 * r / (1 + r)
 
 
 def compute_PCA(
