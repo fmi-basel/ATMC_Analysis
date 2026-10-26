@@ -157,18 +157,20 @@ Choose the instructions for your operating system.
 
 **macOS / Linux**
 ```bash
-curl -LsSf https://astral.sh/uv/install.sh | sh
+curl -LsSf https://astral.sh/uv/0.13.4/install.sh | sh
 ```
 
 **Windows (PowerShell)**
 ```powershell
-powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/0.13.4/install.ps1 | iex"
 ```
 
-After installation, restart your terminal and verify it worked:
+After installation, restart your terminal and verify it worked (it should report `uv 0.13.4`):
 ```bash
 uv --version
 ```
+
+If you already have a different uv version installed, switch to the pinned one with `uv self update 0.13.4`.
 
 ### 2. Clone the Repository
 
@@ -193,7 +195,8 @@ uv sync
 > ```bash
 > conda create -n atmc_hcs_env python=3.13 -c conda-forge --override-channels
 > conda activate atmc_hcs_env
-> pip install uv
+> python -m pip install pip==26.2.2
+> pip install uv==0.13.4
 > export UV_PROJECT_ENVIRONMENT=$CONDA_PREFIX
 > uv sync
 > python -m ipykernel install --user --name=ATMC_HCS_Analysis --display-name="ATMC HCS Analysis"

@@ -29,3 +29,6 @@ dependencies = [
 dev = [
     "deptry>=0.25.1",
 ]
+
+[tool.uv]
+required-version = "==0.13.4"
